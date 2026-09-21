@@ -52,19 +52,21 @@ def run_ping_server():
 
 if __name__ == "__main__":
     logger.info("Initializing BotClusters...")
-    update_thread = threading.Thread(target=run_update, name="UpdateThread")
-    update_thread.start()
-    update_thread.join()
-    time.sleep(1)
 
+    # Start the web server immediately so Koyeb/Render health check probes succeed instantly
+    web_server_thread = threading.Thread(target=run_web_server, name="WebServerThread", daemon=True)
+    web_server_thread.start()
+
+    # Background support services
     threads = [
-        threading.Thread(target=run_web_server, name="WebServerThread", daemon=True),
+        web_server_thread,
+        threading.Thread(target=run_update, name="UpdateThread", daemon=True),
         threading.Thread(target=run_supervisord, name="SupervisorThread", daemon=True),
         threading.Thread(target=run_worker, name="WorkerThread", daemon=True),
         threading.Thread(target=run_ping_server, name="PingServerThread", daemon=True)
     ]
 
-    for t in threads:
+    for t in threads[1:]:
         t.start()
 
     logger.info("All BotClusters background services started successfully.")

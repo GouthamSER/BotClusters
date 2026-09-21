@@ -344,7 +344,18 @@ def delete_supervisor_logs(process_name):
     except Exception as e:
         logger.error(f"Error deleting logs for {process_name}: {e}")
 
-# ── Authentication Routes ───────────────────────────────────────
+# ── Health Check Endpoints (Koyeb, Render, Kubernetes, Docker) ──
+@app.route('/health')
+@app.route('/healthz')
+@app.route('/ping')
+def health_check():
+    return jsonify({
+        "status": "healthy",
+        "service": "BotClusters",
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }), 200
+
+# ── Authentication & Main Routes ────────────────────────────────
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
@@ -359,7 +370,7 @@ def login():
         else:
             flash('Invalid username or password. Please try again.')
 
-    return render_template('login.html')
+    return render_template('login.html'), 200
 
 @app.route('/logout')
 def logout():
@@ -368,9 +379,11 @@ def logout():
     return redirect(url_for('login'))
 
 @app.route('/')
-@login_required
 def cluster():
-    return render_template('cluster.html')
+    # If authenticated, render dashboard; otherwise render login page directly with HTTP 200
+    if 'logged_in' in session:
+        return render_template('cluster.html'), 200
+    return render_template('login.html'), 200
 
 # ── Supervisor API Routes ───────────────────────────────────────
 @app.route('/supervisor/status', methods=['GET'])
