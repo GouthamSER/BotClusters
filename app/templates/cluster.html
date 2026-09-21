@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BotClusters Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/cluster.css') }}">
+    <link rel="shortcut icon" href="{{ url_for('static', filename='images/cluster.svg') }}" type="image/svg+xml">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <script defer src="{{ url_for('static', filename='js/cluster.js') }}"></script>
+</head>
+
+<body>
+    <div class="dashboard">
+        <!-- Header -->
+        <div class="header">
+            <div class="header-top">
+                <div class="header-title">
+                    <img src="{{ url_for('static', filename='images/cluster.svg') }}" alt="Logo" width="28" height="28" style="vertical-align: middle;">
+                    <h1>BotClusters</h1>
+                    <span class="header-badge" id="bot-count-badge">0 bots</span>
+                </div>
+                <div class="header-actions">
+                    <a href="/logstream" class="header-btn" target="_blank" title="Live Log Stream">
+                        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                            <path d="M2 2h12v2H2V2zm0 4h8v2H2V6zm0 4h10v2H2v-2zm0 4h6v2H2v-2z" />
+                        </svg>
+                        Log Stream
+                    </a>
+                    <button class="header-btn" id="cron-btn" onclick="openCronModal()" title="Scheduled Restarts">
+                        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                            <path d="M8 0a8 8 0 1 0 0 16A8 8 0 0 0 8 0zm0 14A6 6 0 1 1 8 2a6 6 0 0 1 0 12zm.5-9H7v5l4.3 2.5.7-1.2-3.5-2V5z" />
+                        </svg>
+                        Cron
+                    </button>
+                    <a href="/logout" class="header-btn logout-btn" title="Sign out of dashboard">
+                        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                            <path fill-rule="evenodd" d="M10 12.5a.5.5 0 0 1-.5.5h-8a.5.5 0 0 1-.5-.5v-9a.5.5 0 0 1 .5-.5h8a.5.5 0 0 1 .5.5v2a.5.5 0 0 0 1 0v-2A1.5 1.5 0 0 0 9.5 2h-8A1.5 1.5 0 0 0 0 3.5v9A1.5 1.5 0 0 0 1.5 14h8a1.5 1.5 0 0 0 1.5-1.5v-2a.5.5 0 0 0-1 0v2z"/>
+                            <path fill-rule="evenodd" d="M15.854 8.354a.5.5 0 0 0 0-.708l-3-3a.5.5 0 0 0-.708.708L14.293 7.5H5.5a.5.5 0 0 0 0 1h8.793l-2.147 2.146a.5.5 0 0 0 .708.708l3-3z"/>
+                        </svg>
+                        Logout
+                    </a>
+                </div>
+            </div>
+            <div class="header-stats" id="header-stats">
+                <div class="stat-pill stat-online"><span class="stat-dot online"></span><span id="stat-online">0</span> Online</div>
+                <div class="stat-pill stat-offline"><span class="stat-dot offline"></span><span id="stat-offline">0</span> Offline</div>
+                <div class="stat-pill stat-paused"><span class="stat-dot paused"></span><span id="stat-paused">0</span> Paused</div>
+            </div>
+        </div>
+
+        <!-- Bot Grid -->
+        <div class="bot-grid" id="bot-grid">
+            <!-- Bot cards will be dynamically populated here -->
+        </div>
+    </div>
+
+    <!-- Log Modal -->
+    <div id="log-modal" class="modal">
+        <div class="modal-content modal-lg">
+            <div class="modal-header">
+                <h2 id="log-modal-title">Process Logs</h2>
+                <div class="modal-header-actions">
+                    <button id="download-log-btn" class="control-btn log-btn" style="padding: 5px 12px; font-size: 12px;">Download</button>
+                    <span class="close" onclick="closeLogModal()">&times;</span>
+                </div>
+            </div>
+            <pre id="log-content">Loading logs...</pre>
+        </div>
+    </div>
+
+    <!-- Cron Config Modal -->
+    <div id="cron-modal" class="modal">
+        <div class="modal-content modal-sm">
+            <span class="close" onclick="closeCronModal()">&times;</span>
+            <h2>Restart Schedule</h2>
+            <p class="modal-desc">Set the interval (in hours) for automatic bot restarts. Set to 0 to disable.</p>
+            <div class="cron-input-group">
+                <input type="number" id="cron-hours" min="0" max="720" value="0" placeholder="Hours">
+                <span class="cron-unit">hours</span>
+            </div>
+            <div class="cron-actions">
+                <button class="control-btn save-btn" onclick="saveCron()">Save</button>
+                <button class="control-btn cancel-btn" onclick="closeCronModal()">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <footer id="contact">
+        <div class="container">
+            <p>&copy; 2025-2026 <strong>Goutham Josh</strong>. All Rights Reserved.</p>
+            <p>Maintained by <strong>Goutham Josh</strong> &bull; Original Developer: <a href="https://github.com/mysterydemon" target="_blank">MysteryDemon</a></p>
+        </div>
+    </footer>
+</body>
+
+</html>

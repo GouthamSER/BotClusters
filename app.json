@@ -1,0 +1,26 @@
+{
+    "name": "Bot Cluster",
+    "description": "A Repository To Run Multiple Telegram Bots At Once",
+    "logo": "https://telegra.ph/file/4a483d6f7e6078ae4cd45.jpg",
+    "keywords": ["Telegram", "python", "Cluster", "GitHub", "Repository"],
+    "repository": "https://github.com/GouthamJosh/BotClusters",
+    "success_url": "",
+    "stack": "container",
+    "env": {
+        "CLUSTER_01": {
+            "description": "Cluster definition: [\"botname\", \"git_url\", \"branch\", \"run_command\", {\"ENV\": \"VAL\"}]",
+            "value": "",
+            "required": true
+        },
+        "ADMIN_USERNAME": {
+            "description": "Username for dashboard web GUI",
+            "value": "admin",
+            "required": false
+        },
+        "ADMIN_PASSWORD": {
+            "description": "Password for dashboard web GUI",
+            "value": "password123",
+            "required": false
+        }
+    }
+}
