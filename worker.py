@@ -147,9 +147,14 @@ def load_config(file_path):
                 "cron": cron_value,
             })
 
-        except json.JSONDecodeError:
-            logging.error(f"Error decoding JSON for {cluster['name']}, skipping.")
+        except json.JSONDecodeError as e:
+            msg = f"❌ {cluster['name']} SKIPPED — bad JSON: {e.msg} (line {e.lineno} col {e.colno})"
+            logging.error(msg)
+            print(msg, flush=True)  # forces into Koyeb build/run console, not buried in log file
             continue
+
+    total_set = sum(1 for c in config.get('clusters', []) if os.getenv(c['name']))
+    print(f"📦 Cluster load: {len(clusters)} started / {total_set} env vars set / {len(config.get('clusters', []))} slots total", flush=True)
 
     if not validate_config(clusters):
         raise ValueError("Invalid configuration file.")

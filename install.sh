@@ -55,3 +55,6 @@ if [ -n "$PIP_PACKAGES" ]; then
 fi
 
 echo "[INFO] install.sh script completed"
+
+echo "[INFO] Validating cluster env vars..."
+python3 validate.py || { echo "[ERROR] Cluster config invalid — fix env vars before continuing."; exit 1; }
