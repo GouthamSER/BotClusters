@@ -18,10 +18,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY install.sh /usr/local/bin/
 RUN sed -i 's/\r$//' /usr/local/bin/install.sh && chmod +x /usr/local/bin/install.sh
+
+# Copy the validation script before install.sh runs
+COPY validate.py ./
+
 RUN /usr/local/bin/install.sh
 
 COPY requirements.txt ./
 RUN pip3 install --no-cache-dir -r requirements.txt
+
+# Copy the rest of the application files
 COPY . .
 
 EXPOSE 5000
