@@ -355,6 +355,35 @@ def health_check():
         "timestamp": datetime.now(timezone.utc).isoformat()
     }), 200
 
+# ── Cluster config health (which CLUSTER_xx loaded vs configured) ──
+@app.route('/clusters/check')
+def clusters_check():
+    try:
+        with open("config.json") as f:
+            cfg = json.load(f)
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+    results = []
+    for cluster in cfg.get("clusters", []):
+        name = cluster["name"]
+        raw = os.getenv(name)
+        if raw is None:
+            results.append({"name": name, "status": "skip", "detail": "not set"})
+            continue
+        try:
+            data = json.loads(raw)
+            if not isinstance(data, list) or len(data) < 4:
+                results.append({"name": name, "status": "fail", "detail": "needs [name, git_url, branch, run_command, ...]"})
+            else:
+                results.append({"name": name, "status": "ok", "detail": f"{data[0]} -> {data[1]}"})
+        except json.JSONDecodeError as e:
+            results.append({"name": name, "status": "fail", "detail": f"bad JSON: {e.msg} (line {e.lineno} col {e.colno})"})
+
+    ok = sum(1 for r in results if r["status"] == "ok")
+    fail = sum(1 for r in results if r["status"] == "fail")
+    return jsonify({"ok": ok, "fail": fail, "clusters": results}), 200
+
 # ── Authentication & Main Routes ────────────────────────────────
 @app.route('/login', methods=['GET', 'POST'])
 def login():
