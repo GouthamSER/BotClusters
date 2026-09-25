@@ -4,8 +4,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Log Stream - BotClusters</title>
+    <title>Live Log Stream - BotClusters</title>
     <link rel="shortcut icon" href="{{ url_for('static', filename='images/cluster.svg') }}" type="image/svg+xml">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <style>
         * {
             margin: 0;
@@ -14,8 +17,8 @@
         }
 
         body {
-            font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
-            background: #0d1117;
+            font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+            background: #080b11;
             color: #c9d1d9;
             height: 100vh;
             display: flex;
@@ -27,45 +30,27 @@
             align-items: center;
             justify-content: space-between;
             padding: 12px 20px;
-            background: #161b22;
-            border-bottom: 1px solid #30363d;
+            background: #111723;
+            border-bottom: 1px solid #222d3f;
             flex-shrink: 0;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+
+        .toolbar-left {
+            display: flex;
+            align-items: center;
+            gap: 16px;
         }
 
         .toolbar h1 {
+            font-family: 'Plus Jakarta Sans', sans-serif;
             font-size: 16px;
-            font-weight: 600;
-            color: #58a6ff;
+            font-weight: 700;
+            color: #f1f5f9;
             display: flex;
             align-items: center;
-            gap: 8px;
-        }
-
-        .toolbar-actions {
-            display: flex;
             gap: 10px;
-            align-items: center;
-        }
-
-        .toolbar-actions button {
-            padding: 6px 14px;
-            border: 1px solid #30363d;
-            border-radius: 6px;
-            background: #21262d;
-            color: #c9d1d9;
-            font-size: 13px;
-            cursor: pointer;
-            transition: background 0.15s;
-        }
-
-        .toolbar-actions button:hover {
-            background: #30363d;
-        }
-
-        .toolbar-actions button.active {
-            background: #1f6feb;
-            border-color: #1f6feb;
-            color: #fff;
         }
 
         .status-dot {
@@ -73,25 +58,96 @@
             height: 8px;
             border-radius: 50%;
             display: inline-block;
-            background: #3fb950;
+            background: #10b981;
+            box-shadow: 0 0 8px rgba(16, 185, 129, 0.4);
             animation: blink 1.5s infinite;
         }
 
         .status-dot.disconnected {
-            background: #f85149;
+            background: #ef4444;
+            box-shadow: 0 0 8px rgba(239, 68, 68, 0.4);
             animation: none;
         }
 
         @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.35; }
+        }
 
-            0%,
-            100% {
-                opacity: 1;
-            }
+        .toolbar-filters {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
 
-            50% {
-                opacity: .4;
-            }
+        .filter-select {
+            background: #161f30;
+            border: 1px solid #222d3f;
+            color: #f1f5f9;
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            outline: none;
+            cursor: pointer;
+        }
+
+        .search-input {
+            background: #161f30;
+            border: 1px solid #222d3f;
+            color: #f1f5f9;
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            outline: none;
+            width: 180px;
+            transition: all 0.2s;
+        }
+
+        .search-input:focus {
+            border-color: #3b82f6;
+            width: 240px;
+        }
+
+        .toolbar-actions {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .btn {
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            padding: 6px 14px;
+            border: 1px solid #222d3f;
+            border-radius: 6px;
+            background: #1a2333;
+            color: #cbd5e1;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.15s;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .btn:hover {
+            background: #27354a;
+            color: #fff;
+            border-color: #3b4c68;
+        }
+
+        .btn.active {
+            background: #4f46e5;
+            border-color: #4f46e5;
+            color: #fff;
+        }
+
+        .back-link {
+            color: #818cf8;
+            font-size: 13px;
         }
 
         #log-container {
@@ -103,25 +159,27 @@
 
         .log-line {
             display: flex;
-            gap: 12px;
-            padding: 2px 0;
-            font-size: 13px;
+            gap: 14px;
+            padding: 3px 0;
+            font-size: 12.5px;
             line-height: 1.6;
-            border-bottom: 1px solid rgba(48, 54, 61, .3);
+            border-bottom: 1px solid rgba(34, 45, 63, 0.4);
         }
 
         .log-line:hover {
-            background: rgba(56, 139, 253, .05);
+            background: rgba(99, 102, 241, 0.06);
         }
 
         .log-source {
             flex-shrink: 0;
-            color: #8b949e;
-            min-width: 220px;
+            color: #38bdf8;
+            min-width: 180px;
+            max-width: 240px;
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
             font-size: 12px;
+            font-weight: 600;
         }
 
         .log-text {
@@ -131,49 +189,71 @@
         }
 
         .log-text.stderr {
-            color: #f8847d;
+            color: #f87171;
         }
 
         .log-text.stdout {
-            color: #adbac7;
+            color: #cbd5e1;
         }
 
-        .back-link {
-            color: #58a6ff;
-            text-decoration: none;
-            font-size: 13px;
-            display: flex;
-            align-items: center;
-            gap: 4px;
-        }
-
-        .back-link:hover {
-            text-decoration: underline;
+        .empty-logs-msg {
+            color: #64748b;
+            text-align: center;
+            margin-top: 40px;
+            font-size: 14px;
         }
     </style>
 </head>
 
 <body>
     <div class="toolbar">
-        <h1>
-            <span class="status-dot" id="status-dot"></span>
-            Log Stream
-        </h1>
+        <div class="toolbar-left">
+            <a href="/" class="btn back-link">&#8592; Dashboard</a>
+            <h1>
+                <span class="status-dot" id="status-dot"></span>
+                Cluster Log Stream
+            </h1>
+        </div>
+
+        <div class="toolbar-filters">
+            <select class="filter-select" id="bot-filter" onchange="applyFilters()">
+                <option value="all">All Bots</option>
+            </select>
+
+            <select class="filter-select" id="level-filter" onchange="applyFilters()">
+                <option value="all">All Levels</option>
+                <option value="stdout">STDOUT only</option>
+                <option value="stderr">STDERR only</option>
+            </select>
+
+            <input type="text" class="search-input" id="search-filter" placeholder="Filter / grep logs..." oninput="applyFilters()">
+        </div>
+
         <div class="toolbar-actions">
-            <a href="/" class="back-link">&#8592; Dashboard</a>
-            <button onclick="toggleAutoScroll()" id="scroll-btn" class="active">Auto-scroll</button>
-            <button onclick="clearLogs()">Clear</button>
+            <button onclick="toggleAutoScroll()" id="scroll-btn" class="btn active">Auto-scroll</button>
+            <button onclick="downloadStreamLogs()" class="btn">⬇ Download</button>
+            <button onclick="clearLogs()" class="btn">Clear</button>
         </div>
     </div>
-    <div id="log-container"></div>
+
+    <div id="log-container">
+        <div class="empty-logs-msg" id="empty-msg">Connecting to live log stream...</div>
+    </div>
 
     <script>
         const container = document.getElementById('log-container');
         const statusDot = document.getElementById('status-dot');
         const scrollBtn = document.getElementById('scroll-btn');
+        const botFilter = document.getElementById('bot-filter');
+        const levelFilter = document.getElementById('level-filter');
+        const searchFilter = document.getElementById('search-filter');
+        const emptyMsg = document.getElementById('empty-msg');
+
         let autoScroll = true;
         let evtSource = null;
-        const MAX_LINES = 5000;
+        const MAX_LINES = 6000;
+        const knownSources = new Set();
+        const storedLines = [];
 
         function toggleAutoScroll() {
             autoScroll = !autoScroll;
@@ -182,7 +262,40 @@
         }
 
         function clearLogs() {
+            storedLines.length = 0;
             container.innerHTML = '';
+        }
+
+        function downloadStreamLogs() {
+            const text = storedLines.map(l => `[${l.source}] ${l.text}`).join('\n');
+            const blob = new Blob([text], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `botclusters_stream_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.txt`;
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        function applyFilters() {
+            const selectedBot = botFilter.value;
+            const selectedLevel = levelFilter.value;
+            const query = searchFilter.value.toLowerCase().trim();
+
+            const lines = container.getElementsByClassName('log-line');
+            for (let el of lines) {
+                const src = el.getAttribute('data-source');
+                const lvl = el.getAttribute('data-level');
+                const txt = el.getAttribute('data-text').toLowerCase();
+
+                let match = true;
+                if (selectedBot !== 'all' && src !== selectedBot) match = false;
+                if (selectedLevel !== 'all' && lvl !== selectedLevel) match = false;
+                if (query && !txt.includes(query)) match = false;
+
+                el.style.display = match ? 'flex' : 'none';
+            }
+            if (autoScroll) container.scrollTop = container.scrollHeight;
         }
 
         function connect() {
@@ -193,25 +306,62 @@
             evtSource.onmessage = function (e) {
                 try {
                     const msg = JSON.parse(e.data);
-                    const lines = msg.data.split('\n').filter(l => l.trim());
+                    const rawLines = msg.data.split('\n').filter(l => l.trim());
                     const isErr = msg.file.includes('_err');
-                    lines.forEach(line => {
+                    const sourceName = msg.file.replace('_out.log', '').replace('_err.log', '');
+
+                    if (!knownSources.has(sourceName)) {
+                        knownSources.add(sourceName);
+                        const opt = document.createElement('option');
+                        opt.value = sourceName;
+                        opt.textContent = sourceName;
+                        botFilter.appendChild(opt);
+                    }
+
+                    if (emptyMsg && emptyMsg.parentNode) {
+                        emptyMsg.parentNode.removeChild(emptyMsg);
+                    }
+
+                    const selectedBot = botFilter.value;
+                    const selectedLevel = levelFilter.value;
+                    const query = searchFilter.value.toLowerCase().trim();
+
+                    rawLines.forEach(line => {
+                        storedLines.push({
+                            source: sourceName,
+                            level: isErr ? 'stderr' : 'stdout',
+                            text: line
+                        });
+
                         const el = document.createElement('div');
                         el.className = 'log-line';
+                        el.setAttribute('data-source', sourceName);
+                        el.setAttribute('data-level', isErr ? 'stderr' : 'stdout');
+                        el.setAttribute('data-text', line);
+
+                        let visible = true;
+                        if (selectedBot !== 'all' && sourceName !== selectedBot) visible = false;
+                        if (selectedLevel !== 'all' && (isErr ? 'stderr' : 'stdout') !== selectedLevel) visible = false;
+                        if (query && !line.toLowerCase().includes(query)) visible = false;
+                        if (!visible) el.style.display = 'none';
+
                         const src = document.createElement('span');
                         src.className = 'log-source';
-                        src.textContent = msg.file.replace('_out.log', '').replace('_err.log', '');
+                        src.textContent = sourceName;
+
                         const txt = document.createElement('span');
                         txt.className = 'log-text ' + (isErr ? 'stderr' : 'stdout');
                         txt.textContent = line;
+
                         el.appendChild(src);
                         el.appendChild(txt);
                         container.appendChild(el);
                     });
-                    // Trim old lines
+
                     while (container.children.length > MAX_LINES) {
                         container.removeChild(container.firstChild);
                     }
+
                     if (autoScroll) container.scrollTop = container.scrollHeight;
                 } catch (err) {
                     console.error('Parse error:', err);

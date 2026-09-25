@@ -4,96 +4,403 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BotClusters Dashboard</title>
+    <title>BotClusters - Cluster Control Center</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/cluster.css') }}">
     <link rel="shortcut icon" href="{{ url_for('static', filename='images/cluster.svg') }}" type="image/svg+xml">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
     <script defer src="{{ url_for('static', filename='js/cluster.js') }}"></script>
 </head>
 
 <body>
-    <div class="dashboard">
-        <!-- Header -->
-        <div class="header">
-            <div class="header-top">
-                <div class="header-title">
-                    <img src="{{ url_for('static', filename='images/cluster.svg') }}" alt="Logo" width="28" height="28" style="vertical-align: middle;">
-                    <h1>BotClusters</h1>
-                    <span class="header-badge" id="bot-count-badge">0 bots</span>
+    <div class="dashboard-wrapper">
+        <!-- System Resource & Health Bar -->
+        <header class="system-bar" id="system-bar">
+            <div class="system-stat">
+                <span class="system-label">CPU LOAD</span>
+                <div class="stat-progress-group">
+                    <div class="progress-track"><div class="progress-fill" id="sys-cpu-bar" style="width: 0%;"></div></div>
+                    <span class="system-val" id="sys-cpu-val">0%</span>
                 </div>
-                <div class="header-actions">
-                    <a href="/logstream" class="header-btn" target="_blank" title="Live Log Stream">
-                        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-                            <path d="M2 2h12v2H2V2zm0 4h8v2H2V6zm0 4h10v2H2v-2zm0 4h6v2H2v-2z" />
-                        </svg>
+            </div>
+            <div class="system-stat">
+                <span class="system-label">MEMORY</span>
+                <div class="stat-progress-group">
+                    <div class="progress-track"><div class="progress-fill" id="sys-ram-bar" style="width: 0%;"></div></div>
+                    <span class="system-val" id="sys-ram-val">0 / 0 MB (0%)</span>
+                </div>
+            </div>
+            <div class="system-stat">
+                <span class="system-label">DISK</span>
+                <div class="stat-progress-group">
+                    <div class="progress-track"><div class="progress-fill" id="sys-disk-bar" style="width: 0%;"></div></div>
+                    <span class="system-val" id="sys-disk-val">0 GB (0%)</span>
+                </div>
+            </div>
+            <div class="system-stat-pills">
+                <span class="pill-badge" id="sys-uptime" title="Host Uptime">⏱️ Up: 0h 0m</span>
+                <span class="pill-badge" id="sys-python" title="Python Runtime">🐍 Python 3</span>
+            </div>
+        </header>
+
+        <!-- Main Header & Control Hub -->
+        <div class="header-card">
+            <div class="header-top">
+                <div class="brand">
+                    <div class="brand-logo-glow">
+                        <img src="{{ url_for('static', filename='images/cluster.svg') }}" alt="BotClusters Logo" width="34" height="34">
+                    </div>
+                    <div>
+                        <div class="brand-title-row">
+                            <h1>BotClusters</h1>
+                            <span class="version-tag">v8.0 PRO</span>
+                            <span class="cluster-badge" id="bot-count-badge">0 Bots</span>
+                        </div>
+                        <p class="brand-subtitle">Multi-Instance Bot Cluster Supervision & Deployment Hub</p>
+                    </div>
+                </div>
+
+                <div class="header-action-group">
+                    <button class="btn btn-primary" id="btn-add-bot" onclick="openAddBotModal()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                        Add Bot
+                    </button>
+                    <div class="dropdown">
+                        <button class="btn btn-secondary dropdown-toggle" id="btn-batch-actions" onclick="toggleBatchDropdown()">
+                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                            Batch Actions ▾
+                        </button>
+                        <div class="dropdown-menu" id="batch-dropdown-menu">
+                            <a href="javascript:void(0)" onclick="executeBatchAction('start_all')">▶ Start All Bots</a>
+                            <a href="javascript:void(0)" onclick="executeBatchAction('stop_all')">⏹ Stop All Bots</a>
+                            <a href="javascript:void(0)" onclick="executeBatchAction('restart_all')">🔄 Restart All Bots</a>
+                        </div>
+                    </div>
+                    <a href="/logstream" class="btn btn-secondary" target="_blank" title="Live Log Stream">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
                         Log Stream
                     </a>
-                    <button class="header-btn" id="cron-btn" onclick="openCronModal()" title="Scheduled Restarts">
-                        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-                            <path d="M8 0a8 8 0 1 0 0 16A8 8 0 0 0 8 0zm0 14A6 6 0 1 1 8 2a6 6 0 0 1 0 12zm.5-9H7v5l4.3 2.5.7-1.2-3.5-2V5z" />
-                        </svg>
-                        Cron
+                    <button class="btn btn-icon" id="cron-btn" onclick="openCronModal()" title="Scheduled Restarts">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
                     </button>
-                    <a href="/logout" class="header-btn logout-btn" title="Sign out of dashboard">
-                        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-                            <path fill-rule="evenodd" d="M10 12.5a.5.5 0 0 1-.5.5h-8a.5.5 0 0 1-.5-.5v-9a.5.5 0 0 1 .5-.5h8a.5.5 0 0 1 .5.5v2a.5.5 0 0 0 1 0v-2A1.5 1.5 0 0 0 9.5 2h-8A1.5 1.5 0 0 0 0 3.5v9A1.5 1.5 0 0 0 1.5 14h8a1.5 1.5 0 0 0 1.5-1.5v-2a.5.5 0 0 0-1 0v2z"/>
-                            <path fill-rule="evenodd" d="M15.854 8.354a.5.5 0 0 0 0-.708l-3-3a.5.5 0 0 0-.708.708L14.293 7.5H5.5a.5.5 0 0 0 0 1h8.793l-2.147 2.146a.5.5 0 0 0 .708.708l3-3z"/>
-                        </svg>
-                        Logout
+                    <button class="btn btn-icon" id="backup-btn" onclick="openBackupModal()" title="Backup & Restore">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                    </button>
+                    <button class="btn btn-icon" id="settings-btn" onclick="openSettingsModal()" title="Cluster Settings & Alerts">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                    </button>
+                    <a href="/logout" class="btn btn-icon btn-logout" title="Sign Out">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
                     </a>
                 </div>
             </div>
-            <div class="header-stats" id="header-stats">
-                <div class="stat-pill stat-online"><span class="stat-dot online"></span><span id="stat-online">0</span> Online</div>
-                <div class="stat-pill stat-offline"><span class="stat-dot offline"></span><span id="stat-offline">0</span> Offline</div>
-                <div class="stat-pill stat-paused"><span class="stat-dot paused"></span><span id="stat-paused">0</span> Paused</div>
+
+            <!-- Filter & Search Toolbar -->
+            <div class="filter-toolbar">
+                <div class="search-box">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                    <input type="text" id="bot-search-input" placeholder="Search bots by name, repo, or slot..." oninput="handleSearchFilter()">
+                    <button id="clear-search-btn" class="clear-btn" onclick="clearSearch()" style="display:none;">&times;</button>
+                </div>
+
+                <div class="filter-chips">
+                    <button class="filter-chip active" data-filter="all" onclick="setFilter('all')">
+                        All <span class="chip-count" id="chip-count-all">0</span>
+                    </button>
+                    <button class="filter-chip" data-filter="online" onclick="setFilter('online')">
+                        <span class="status-dot online"></span> Online <span class="chip-count" id="chip-count-online">0</span>
+                    </button>
+                    <button class="filter-chip" data-filter="offline" onclick="setFilter('offline')">
+                        <span class="status-dot offline"></span> Offline <span class="chip-count" id="chip-count-offline">0</span>
+                    </button>
+                    <button class="filter-chip" data-filter="paused" onclick="setFilter('paused')">
+                        <span class="status-dot paused"></span> Paused <span class="chip-count" id="chip-count-paused">0</span>
+                    </button>
+                    <button class="filter-chip" data-filter="fatal" onclick="setFilter('fatal')">
+                        <span class="status-dot fatal"></span> Failed <span class="chip-count" id="chip-count-fatal">0</span>
+                    </button>
+                </div>
+
+                <div class="sort-select-wrapper">
+                    <label for="sort-select">Sort:</label>
+                    <select id="sort-select" onchange="handleSearchFilter()">
+                        <option value="slot">Slot Number</option>
+                        <option value="name">Bot Name (A-Z)</option>
+                        <option value="status">Status</option>
+                        <option value="memory">RAM Usage</option>
+                        <option value="uptime">Uptime</option>
+                    </select>
+                </div>
             </div>
         </div>
 
         <!-- Bot Grid -->
-        <div class="bot-grid" id="bot-grid">
-            <!-- Bot cards will be dynamically populated here -->
+        <main class="bot-grid" id="bot-grid">
+            <!-- Dynamically populated cards -->
+        </main>
+    </div>
+
+    <!-- ── Add / Edit Bot Modal ── -->
+    <div id="bot-modal" class="modal">
+        <div class="modal-content modal-md">
+            <div class="modal-header">
+                <div class="modal-title-group">
+                    <div class="modal-icon-badge" id="bot-modal-icon">🤖</div>
+                    <div>
+                        <h2 id="bot-modal-title">Add New Bot Cluster</h2>
+                        <p class="modal-desc" id="bot-modal-desc">Configure git repository, entry script, and environment variables.</p>
+                    </div>
+                </div>
+                <span class="modal-close" onclick="closeBotModal()">&times;</span>
+            </div>
+
+            <form id="bot-form" onsubmit="handleBotFormSubmit(event)">
+                <input type="hidden" id="form-edit-slot" value="">
+                
+                <div class="form-row form-row-2">
+                    <div class="form-group">
+                        <label for="form-bot-name">Bot Identifier <span class="req">*</span></label>
+                        <input type="text" id="form-bot-name" placeholder="e.g. musicbot01" required pattern="^[a-zA-Z0-9_\-]+$">
+                        <small class="form-hint">Alphanumeric, underscores, or hyphens only.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="form-slot">Cluster Slot</label>
+                        <input type="text" id="form-slot" placeholder="Auto (e.g. CLUSTER_01)">
+                        <small class="form-hint">Auto-assigned if left blank.</small>
+                    </div>
+                </div>
+
+                <div class="form-row form-row-2">
+                    <div class="form-group">
+                        <label for="form-git-url">Git Repository URL <span class="req">*</span></label>
+                        <input type="text" id="form-git-url" placeholder="https://github.com/user/bot.git" required>
+                        <small class="form-hint">Public or private tokenized Git URL.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="form-branch">Branch</label>
+                        <input type="text" id="form-branch" placeholder="main" value="main">
+                    </div>
+                </div>
+
+                <div class="form-row form-row-2">
+                    <div class="form-group">
+                        <label for="form-run-cmd">Run Command / Entrypoint <span class="req">*</span></label>
+                        <div class="input-with-datalist">
+                            <input type="text" id="form-run-cmd" list="cmd-presets" placeholder="bot.py" required value="bot.py">
+                            <datalist id="cmd-presets">
+                                <option value="bot.py">
+                                <option value="main.py">
+                                <option value="app.py">
+                                <option value="start.sh">
+                            </datalist>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="form-py-ver">Python Version</label>
+                        <select id="form-py-ver">
+                            <option value="">Default (System Python)</option>
+                            <option value="3.12">Python 3.12</option>
+                            <option value="3.11">Python 3.11</option>
+                            <option value="3.10">Python 3.10</option>
+                            <option value="3.9">Python 3.9</option>
+                            <option value="3.8">Python 3.8</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- Environment Variables Builder -->
+                <div class="env-builder-section">
+                    <div class="env-builder-header">
+                        <label>Environment Variables (ENV)</label>
+                        <button type="button" class="btn btn-sm btn-secondary" onclick="addEnvRow()">+ Add Variable</button>
+                    </div>
+                    <div class="env-rows-container" id="env-rows-container">
+                        <!-- Dynamic Key-Value Rows -->
+                    </div>
+                </div>
+
+                <div class="form-checkbox-row">
+                    <label class="custom-checkbox">
+                        <input type="checkbox" id="form-auto-start" checked>
+                        <span class="checkmark"></span>
+                        Auto-start bot immediately after saving
+                    </label>
+                </div>
+
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" onclick="closeBotModal()">Cancel</button>
+                    <button type="submit" class="btn btn-primary" id="btn-save-bot">Save &amp; Deploy</button>
+                </div>
+            </form>
         </div>
     </div>
 
-    <!-- Log Modal -->
+    <!-- ── Bot Console / Terminal Modal ── -->
+    <div id="console-modal" class="modal">
+        <div class="modal-content modal-lg">
+            <div class="modal-header">
+                <div>
+                    <h2 id="console-modal-title">Bot Terminal Console</h2>
+                    <p class="modal-desc" id="console-modal-desc">Execute diagnostic shell commands in bot environment.</p>
+                </div>
+                <span class="modal-close" onclick="closeConsoleModal()">&times;</span>
+            </div>
+
+            <div class="console-body">
+                <div class="console-presets">
+                    <span>Quick commands:</span>
+                    <button class="preset-btn" onclick="runPresetCommand('git status')">git status</button>
+                    <button class="preset-btn" onclick="runPresetCommand('git log -3 --oneline')">git log -3</button>
+                    <button class="preset-btn" onclick="runPresetCommand('pip list')">pip list</button>
+                    <button class="preset-btn" onclick="runPresetCommand('python --version')">python --version</button>
+                </div>
+
+                <div class="console-screen" id="console-output">Select a command or type below to run...</div>
+
+                <form class="console-input-bar" onsubmit="handleConsoleSubmit(event)">
+                    <span class="prompt">$</span>
+                    <input type="text" id="console-input" placeholder="Type command (e.g. pip list, git status)..." autocomplete="off">
+                    <button type="submit" class="btn btn-primary btn-sm" id="btn-console-run">Run</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Log Modal ── -->
     <div id="log-modal" class="modal">
         <div class="modal-content modal-lg">
             <div class="modal-header">
-                <h2 id="log-modal-title">Process Logs</h2>
+                <div>
+                    <h2 id="log-modal-title">Process Logs</h2>
+                    <p class="modal-desc" id="log-modal-desc">Recent stdout &amp; stderr output</p>
+                </div>
                 <div class="modal-header-actions">
-                    <button id="download-log-btn" class="control-btn log-btn" style="padding: 5px 12px; font-size: 12px;">Download</button>
-                    <span class="close" onclick="closeLogModal()">&times;</span>
+                    <button id="refresh-log-btn" class="btn btn-sm btn-secondary" onclick="refreshCurrentLogs()">🔄 Refresh</button>
+                    <button id="download-log-btn" class="btn btn-sm btn-secondary">⬇ Download</button>
+                    <span class="modal-close" onclick="closeLogModal()">&times;</span>
                 </div>
             </div>
-            <pre id="log-content">Loading logs...</pre>
+            <pre id="log-content">Loading logs from server...</pre>
         </div>
     </div>
 
-    <!-- Cron Config Modal -->
+    <!-- ── Cron Config Modal ── -->
     <div id="cron-modal" class="modal">
         <div class="modal-content modal-sm">
-            <span class="close" onclick="closeCronModal()">&times;</span>
-            <h2>Restart Schedule</h2>
-            <p class="modal-desc">Set the interval (in hours) for automatic bot restarts. Set to 0 to disable.</p>
+            <div class="modal-header">
+                <div>
+                    <h2>Restart Schedule</h2>
+                    <p class="modal-desc">Set the interval (in hours) for automatic bot cluster restarts. Set to 0 to disable.</p>
+                </div>
+                <span class="modal-close" onclick="closeCronModal()">&times;</span>
+            </div>
             <div class="cron-input-group">
                 <input type="number" id="cron-hours" min="0" max="720" value="0" placeholder="Hours">
                 <span class="cron-unit">hours</span>
             </div>
-            <div class="cron-actions">
-                <button class="control-btn save-btn" onclick="saveCron()">Save</button>
-                <button class="control-btn cancel-btn" onclick="closeCronModal()">Cancel</button>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeCronModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="saveCron()">Save Schedule</button>
             </div>
         </div>
     </div>
 
+    <!-- ── Settings & Telegram Alerts Modal ── -->
+    <div id="settings-modal" class="modal">
+        <div class="modal-content modal-md">
+            <div class="modal-header">
+                <div>
+                    <h2>Cluster Settings &amp; Alerts</h2>
+                    <p class="modal-desc">Admin authentication, keep-alive ping, and Telegram notifications.</p>
+                </div>
+                <span class="modal-close" onclick="closeSettingsModal()">&times;</span>
+            </div>
+
+            <form id="settings-form" onsubmit="handleSettingsSubmit(event)">
+                <h3 class="settings-section-title">🔑 Dashboard Credentials</h3>
+                <div class="form-row form-row-2">
+                    <div class="form-group">
+                        <label for="set-username">Admin Username</label>
+                        <input type="text" id="set-username" placeholder="admin">
+                    </div>
+                    <div class="form-group">
+                        <label for="set-password">New Password</label>
+                        <input type="password" id="set-password" placeholder="Leave blank to keep current">
+                    </div>
+                </div>
+
+                <h3 class="settings-section-title">🌐 Ping Keep-Alive (Render / Koyeb)</h3>
+                <div class="form-row form-row-2">
+                    <div class="form-group">
+                        <label for="set-app-url">App Public URL</label>
+                        <input type="url" id="set-app-url" placeholder="https://my-app.koyeb.app">
+                    </div>
+                    <div class="form-group">
+                        <label for="set-ping-interval">Ping Interval (seconds)</label>
+                        <input type="number" id="set-ping-interval" value="240" min="30">
+                    </div>
+                </div>
+
+                <h3 class="settings-section-title">📢 Telegram Crash &amp; Auto-Pause Alerts</h3>
+                <div class="form-group">
+                    <label for="set-telegram-token">Telegram Bot Token</label>
+                    <input type="text" id="set-telegram-token" placeholder="123456789:ABCdefGhIJKlmNoPQRstuvwxYZ">
+                </div>
+                <div class="form-row form-row-2">
+                    <div class="form-group">
+                        <label for="set-telegram-chat">Admin Chat ID</label>
+                        <input type="text" id="set-telegram-chat" placeholder="e.g. 123456789 or @channel">
+                    </div>
+                    <div class="form-group flex-align-end">
+                        <button type="button" class="btn btn-secondary btn-full" onclick="testTelegramAlert()">🔔 Send Test Alert</button>
+                    </div>
+                </div>
+
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" onclick="closeSettingsModal()">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Save Settings</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- ── Backup & Restore Modal ── -->
+    <div id="backup-modal" class="modal">
+        <div class="modal-content modal-sm">
+            <div class="modal-header">
+                <div>
+                    <h2>Backup &amp; Restore</h2>
+                    <p class="modal-desc">Export or import your cluster configuration JSON.</p>
+                </div>
+                <span class="modal-close" onclick="closeBackupModal()">&times;</span>
+            </div>
+
+            <div class="backup-actions">
+                <div class="backup-box">
+                    <h4>Export Backup</h4>
+                    <p>Download a JSON snapshot of all your configured bots and environment values.</p>
+                    <a href="/api/config/export" class="btn btn-primary btn-full" download>⬇ Export Clusters JSON</a>
+                </div>
+
+                <div class="backup-box">
+                    <h4>Restore / Import</h4>
+                    <p>Upload a previously exported JSON backup file to restore bots.</p>
+                    <input type="file" id="import-file-input" accept=".json" style="display:none" onchange="handleImportFile(event)">
+                    <button class="btn btn-secondary btn-full" onclick="document.getElementById('import-file-input').click()">📁 Select JSON File to Import</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Toast Notifications Container ── -->
+    <div id="toast-container" class="toast-container"></div>
+
     <footer id="contact">
         <div class="container">
             <p>&copy; 2025-2026 <strong>Goutham Josh</strong>. All Rights Reserved.</p>
-            <p>Maintained by <strong>Goutham Josh</strong> &bull; Original Developer: <a href="https://github.com/mysterydemon" target="_blank">MysteryDemon</a></p>
+            <p>Maintained by <strong>Goutham Josh</strong> &bull; Original Developer: <a href="https://github.com/mysterydemon" target="_blank" rel="noopener">MysteryDemon</a></p>
         </div>
     </footer>
 </body>

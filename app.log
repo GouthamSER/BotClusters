@@ -1,0 +1,4 @@
+2026-09-25 22:32:41,207 - app.utils.process_manager - INFO - Cloning testbot99 from https://github.com/example/testbot.git branch main into \app\testbot99
+2026-09-25 22:32:41,213 - app.routes.routes - ERROR - Error setting up bot environment: [WinError 2] The system cannot find the file specified
+2026-09-25 22:32:41,235 - app.routes.routes - ERROR - Error broadcasting status update: Server.emit() got an unexpected keyword argument 'broadcast'
+2026-09-25 22:32:41,275 - app.routes.routes - ERROR - Error broadcasting status update: Server.emit() got an unexpected keyword argument 'broadcast'

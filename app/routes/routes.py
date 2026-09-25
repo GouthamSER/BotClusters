@@ -19,6 +19,7 @@ import time
 import threading
 import configparser
 from collections import defaultdict
+import io
 
 import psutil
 from dotenv import load_dotenv
@@ -31,6 +32,22 @@ from flask import (
     send_file, abort, redirect, url_for, session, flash, stream_with_context
 )
 from flask_socketio import SocketIO, emit
+
+from app.utils.cluster_config import (
+    SUPERVISORD_CONF_DIR, SUPERVISOR_LOG_DIR, APP_BASE_DIR,
+    get_configured_clusters, get_next_available_slot,
+    save_cluster_to_env, delete_cluster_from_env,
+    update_general_setting, export_all_clusters,
+    import_clusters_from_dict, send_telegram_alert,
+    get_git_info
+)
+from app.utils.process_manager import (
+    get_system_metrics, get_process_resource_usage,
+    has_supervisorctl, prepare_bot_environment,
+    write_supervisor_config_file,
+    _fallback_start, _fallback_stop, _fallback_status,
+    _DEV_PROCESSES
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -74,8 +91,6 @@ def kill_background_task(task):
         except Exception:
             pass
 
-SUPERVISOR_LOG_DIR = os.environ.get("SUPERVISOR_LOG_DIR", "/var/log/supervisor")
-SUPERVISORD_CONF_DIR = os.environ.get("SUPERVISORD_CONF_DIR", "/etc/supervisor/conf.d")
 STATUS_CHECK_INTERVAL = 2
 MAX_STATUS_CHECK_ATTEMPTS = 10
 TEMP_SUPERVISOR_CONFIGS = {}
@@ -90,6 +105,7 @@ CRON_RESTART_INTERVAL = int(os.environ.get('CRON_RESTART_HOURS', 0))
 _cron_thread = None
 
 def get_auth_users():
+    load_dotenv('cluster.env', override=True)
     admin_user = os.environ.get("ADMIN_USERNAME", "admin")
     admin_pass = os.environ.get("ADMIN_PASSWORD", "password123")
     return {admin_user: admin_pass}
@@ -98,7 +114,7 @@ def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if 'logged_in' not in session:
-            if request.is_json or request.path.startswith('/supervisor'):
+            if request.is_json or request.path.startswith('/supervisor') or request.path.startswith('/api'):
                 return jsonify({"status": "error", "message": "Authentication required"}), 401
             return redirect(url_for('login'))
         return f(*args, **kwargs)
@@ -146,8 +162,22 @@ def parse_supervisor_status(status_line):
     return None
 
 def run_supervisor_command(command, process_name=None, timeout=30):
-    if not shutil.which("supervisorctl"):
-        return {"status": "error", "message": "supervisorctl not found on this system"}
+    if not has_supervisorctl():
+        # Cross-platform fallback process runner for Windows/local environments without supervisorctl
+        if command == "status":
+            return {"status": "success", "message": _fallback_status()}
+        elif command == "start" and process_name:
+            return _fallback_start(process_name)
+        elif command == "stop" and process_name:
+            return _fallback_stop(process_name)
+        elif command == "restart" and process_name:
+            _fallback_stop(process_name)
+            time.sleep(1)
+            return _fallback_start(process_name)
+        elif command in ("reread", "update"):
+            return {"status": "success", "message": "Configuration updated"}
+        return {"status": "error", "message": f"Unsupported command '{command}' on standalone mode"}
+
     try:
         cmd = ["supervisorctl"]
         if command:
@@ -226,40 +256,91 @@ def verify_process_status(process_name, expected_status=None):
         logger.error(f"Error verifying process status: {str(e)}")
         return None
 
+def build_process_status_payload():
+    """Build complete process list with metrics, git status, and system metrics."""
+    status = run_supervisor_command("status")
+    processes = []
+    seen_names = set()
+    configured = get_configured_clusters()
+    config_by_name = {c['safe_name']: c for c in configured}
+    config_by_name.update({c['bot_name']: c for c in configured})
+
+    if status.get("status") == "success" and status.get("message"):
+        for proc_line in status["message"].splitlines():
+            parsed = parse_supervisor_status(proc_line)
+            if parsed:
+                pname = parsed["name"]
+                seen_names.add(pname)
+                if parsed["status"] in ("FATAL", "BACKOFF", "EXITED"):
+                    FAILURE_COUNTS[pname] += 1
+                    if FAILURE_COUNTS[pname] >= MAX_FAILURES_BEFORE_PAUSE and pname not in PAUSED_BY_SYSTEM:
+                        logger.warning(f"Process {pname} failed {FAILURE_COUNTS[pname]} times, auto-pausing")
+                        PAUSED_BY_SYSTEM.add(pname)
+                        parsed["auto_paused"] = True
+                        send_telegram_alert(f"⚠️ <b>BotClusters Alert</b>\nBot <code>{pname}</code> failed repeatedly ({FAILURE_COUNTS[pname]} times)!\nStatus: <b>{parsed['status']}</b>. Auto-pause activated.")
+                    elif pname in PAUSED_BY_SYSTEM:
+                        parsed["auto_paused"] = True
+                    else:
+                        parsed["auto_paused"] = False
+                else:
+                    if parsed["status"] == "RUNNING":
+                        FAILURE_COUNTS[pname] = 0
+                        if pname in PAUSED_BY_SYSTEM:
+                            PAUSED_BY_SYSTEM.discard(pname)
+                    parsed["auto_paused"] = pname in PAUSED_BY_SYSTEM
+
+                # Add resource consumption & metadata
+                pid = parsed.get("pid")
+                res = get_process_resource_usage(pid)
+                parsed["memory_mb"] = res["memory_mb"]
+                parsed["cpu_percent"] = res["cpu_percent"]
+
+                cfg = config_by_name.get(pname, {})
+                parsed["slot"] = cfg.get("slot", "")
+                parsed["git_url"] = cfg.get("git_url", "")
+                parsed["branch"] = cfg.get("branch", "main")
+                parsed["run_command"] = cfg.get("run_command", "")
+                parsed["git_info"] = cfg.get("git_info", {})
+                parsed["python_version"] = cfg.get("python_version", "")
+
+                processes.append(parsed)
+
+    # Ensure all configured clusters appear on the dashboard
+    for c in configured:
+        sname = c['safe_name']
+        if sname not in seen_names and c['bot_name'] not in seen_names:
+            processes.append({
+                "name": sname,
+                "status": "STOPPED",
+                "pid": None,
+                "uptime": "0:00:00",
+                "paused": False,
+                "auto_paused": False,
+                "memory_mb": 0,
+                "cpu_percent": 0,
+                "slot": c.get("slot", ""),
+                "git_url": c.get("git_url", ""),
+                "branch": c.get("branch", "main"),
+                "run_command": c.get("run_command", ""),
+                "git_info": c.get("git_info", {}),
+                "python_version": c.get("python_version", "")
+            })
+            seen_names.add(sname)
+
+    system_metrics = get_system_metrics()
+    return {
+        "status": "success",
+        "processes": processes,
+        "system": system_metrics,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
 def broadcast_status_update():
     try:
         with app.app_context():
-            status = run_supervisor_command("status")
-            if status["status"] == "success":
-                processes = []
-                for proc_line in status["message"].splitlines():
-                    parsed = parse_supervisor_status(proc_line)
-                    if parsed:
-                        pname = parsed["name"]
-                        if parsed["status"] in ("FATAL", "BACKOFF", "EXITED"):
-                            FAILURE_COUNTS[pname] += 1
-                            if FAILURE_COUNTS[pname] >= MAX_FAILURES_BEFORE_PAUSE and pname not in PAUSED_BY_SYSTEM:
-                                logger.warning(f"Process {pname} has failed {FAILURE_COUNTS[pname]} times, auto-pausing")
-                                PAUSED_BY_SYSTEM.add(pname)
-                                parsed["auto_paused"] = True
-                            elif pname in PAUSED_BY_SYSTEM:
-                                parsed["auto_paused"] = True
-                            else:
-                                parsed["auto_paused"] = False
-                        else:
-                            if parsed["status"] == "RUNNING":
-                                FAILURE_COUNTS[pname] = 0
-                                if pname in PAUSED_BY_SYSTEM:
-                                    PAUSED_BY_SYSTEM.discard(pname)
-                            parsed["auto_paused"] = pname in PAUSED_BY_SYSTEM
-                        processes.append(parsed)
-
-                socketio.emit('status_update', {
-                    "status": "success",
-                    "processes": processes,
-                    "timestamp": datetime.now(timezone.utc).isoformat()
-                }, broadcast=True)
-                return True
+            payload = build_process_status_payload()
+            socketio.emit('status_update', payload, broadcast=True)
+            return True
     except Exception as e:
         logger.error(f"Error broadcasting status update: {str(e)}")
     return False
@@ -282,6 +363,9 @@ def update_process_code(process_name, config_content=None):
                 if section in config:
                     directory = config[section].get('directory')
 
+        if not directory:
+            directory = (APP_BASE_DIR / process_name.replace(' ', '_')).as_posix()
+
         if directory and Path(directory).exists():
             subprocess.run(['git', 'pull'], cwd=directory, check=True)
             logger.info(f"Updated code for {process_name} in {directory}")
@@ -303,15 +387,8 @@ def thoroughly_cleanup(process_name):
     except Exception as e:
         logger.warning(f"Process cleanup notice: {e}")
 
-    directory = None
-    config_path = Path(SUPERVISORD_CONF_DIR) / f"{process_name.replace(' ', '_')}.conf"
-    if config_path.exists():
-        config = configparser.ConfigParser()
-        config.read(config_path)
-        section = 'program:' + process_name
-        if section in config:
-            directory = config[section].get('directory')
-    if directory and Path(directory).exists():
+    directory = (APP_BASE_DIR / process_name.replace(' ', '_'))
+    if directory.exists():
         for root, dirs, files in os.walk(directory):
             for d in dirs:
                 if d == '__pycache__':
@@ -344,7 +421,7 @@ def delete_supervisor_logs(process_name):
     except Exception as e:
         logger.error(f"Error deleting logs for {process_name}: {e}")
 
-# ── Health Check Endpoints (Koyeb, Render, Kubernetes, Docker) ──
+# ── Health Check Endpoints ─────────────────────────────────────
 @app.route('/health')
 @app.route('/healthz')
 @app.route('/ping')
@@ -352,6 +429,7 @@ def health_check():
     return jsonify({
         "status": "healthy",
         "service": "BotClusters",
+        "version": "8.0",
         "timestamp": datetime.now(timezone.utc).isoformat()
     }), 200
 
@@ -380,7 +458,6 @@ def logout():
 
 @app.route('/')
 def cluster():
-    # If authenticated, render dashboard; otherwise render login page directly with HTTP 200
     if 'logged_in' in session:
         return render_template('cluster.html'), 200
     return render_template('login.html'), 200
@@ -389,15 +466,8 @@ def cluster():
 @app.route('/supervisor/status', methods=['GET'])
 @login_required
 def list_supervisor_processes():
-    status = run_supervisor_command("status")
-    if status["status"] == "success":
-        processes = []
-        for line in status["message"].splitlines():
-            process = parse_supervisor_status(line)
-            if process:
-                processes.append(process)
-        return jsonify({"status": "success", "processes": processes}), 200
-    return jsonify(status), 500
+    payload = build_process_status_payload()
+    return jsonify(payload), 200
 
 @app.route('/supervisor/pause/<process_name>', methods=['POST'])
 @login_required
@@ -407,8 +477,7 @@ def pause_supervisor_process(process_name):
     if result["status"] == "success":
         broadcast_status_update()
         return jsonify(result), 200
-    else:
-        return jsonify(result), 500
+    return jsonify(result), 500
 
 @app.route('/supervisor/resume/<process_name>', methods=['POST'])
 @login_required
@@ -418,8 +487,7 @@ def resume_supervisor_process(process_name):
     if result["status"] == "success":
         broadcast_status_update()
         return jsonify(result), 200
-    else:
-        return jsonify(result), 500
+    return jsonify(result), 500
 
 @app.route('/supervisor/<action>/<process_name>', methods=['POST'])
 @login_required
@@ -432,41 +500,17 @@ def manage_supervisor_process(action, process_name):
     if not re.match(r'^[a-zA-Z0-9_\- ]+$', process_name):
         return jsonify({"status": "error", "message": "Invalid process name"}), 400
 
+    safe_name = process_name.replace(' ', '_')
+    config_path = Path(SUPERVISORD_CONF_DIR) / f"{safe_name}.conf"
+
     try:
-        initial_status = verify_process_status(process_name)
-        if initial_status is None:
-            return jsonify({
-                "status": "error",
-                "message": f"Process {process_name} not found"
-            }), 404
-
-        config_path = Path(SUPERVISORD_CONF_DIR) / f"{process_name.replace(' ', '_')}.conf"
-
         if action == "stop":
-            if "RUNNING" not in initial_status:
-                return jsonify({
-                    "status": "error",
-                    "message": f"Process {process_name} is not running"
-                }), 400
-
             result = run_supervisor_command("stop", process_name)
             expected_status = "STOPPED"
-
-            if result["status"] == "success":
-                try:
-                    if config_path.exists():
-                        with open(config_path, 'r', encoding='utf-8') as f:
-                            TEMP_SUPERVISOR_CONFIGS[process_name] = f.read()
-
-                        config_path.unlink()
-                        logger.info(f"Saved and removed supervisor config for {process_name}")
-                        subprocess.run(["supervisorctl", "reread"], check=False)
-                        subprocess.run(["supervisorctl", "update"], check=False)
-                except Exception as e:
-                    logger.error(f"Error handling supervisor config for {process_name}: {e}")
-
         elif action == "start":
-            try:
+            if not has_supervisorctl():
+                result = run_supervisor_command("start", process_name)
+            else:
                 if process_name in TEMP_SUPERVISOR_CONFIGS:
                     config_content = TEMP_SUPERVISOR_CONFIGS[process_name]
                     update_process_code(process_name, config_content)
@@ -475,84 +519,64 @@ def manage_supervisor_process(action, process_name):
                     subprocess.run(["supervisorctl", "reread"], check=False)
                     subprocess.run(["supervisorctl", "update"], check=False)
                     del TEMP_SUPERVISOR_CONFIGS[process_name]
-                else:
-                    update_process_code(process_name)
+                elif not config_path.exists():
+                    configured = get_configured_clusters()
+                    match = next((c for c in configured if c['safe_name'] == safe_name or c['bot_name'] == process_name), None)
+                    if match:
+                        _, cmd = prepare_bot_environment(match)
+                        write_supervisor_config_file(match, cmd)
+                        subprocess.run(["supervisorctl", "reread"], check=False)
+                        subprocess.run(["supervisorctl", "update"], check=False)
 
                 result = run_supervisor_command("start", process_name)
-                expected_status = "RUNNING"
-            except Exception as e:
-                logger.error(f"Error restoring supervisor config for {process_name}: {e}")
-                return jsonify({
-                    "status": "error",
-                    "message": f"Error restoring configuration: {str(e)}"
-                }), 500
-
+            expected_status = "RUNNING"
         elif action == "restart":
-            try:
-                thoroughly_cleanup(process_name)
-                delete_supervisor_logs(process_name)
-                if config_path.exists():
-                    with open(config_path, 'r', encoding='utf-8') as f:
-                        config_content = f.read()
+            thoroughly_cleanup(process_name)
+            delete_supervisor_logs(process_name)
+            result = run_supervisor_command("restart", process_name)
+            expected_status = "RUNNING"
 
-                    result = run_supervisor_command("stop", process_name)
-                    if result["status"] == "success":
-                        config_path.unlink()
-                        subprocess.run(["supervisorctl", "reread"], check=False)
-                        subprocess.run(["supervisorctl", "update"], check=False)
-                        time.sleep(1)
-                        update_process_code(process_name, config_content)
-                        with open(config_path, 'w', encoding='utf-8') as f:
-                            f.write(config_content)
-                        subprocess.run(["supervisorctl", "reread"], check=False)
-                        subprocess.run(["supervisorctl", "update"], check=False)
-                        result = run_supervisor_command("start", process_name)
-                        expected_status = "RUNNING"
-                else:
-                    return jsonify({
-                        "status": "error",
-                        "message": f"Config file not found for {process_name}"
-                    }), 404
-
-            except Exception as e:
-                logger.error(f"Error during restart process for {process_name}: {e}")
-                return jsonify({
-                    "status": "error",
-                    "message": f"Error during restart: {str(e)}"
-                }), 500
-
-        if result["status"] != "success":
+        broadcast_status_update()
+        if result.get("status") == "success":
+            return jsonify({"status": "success", "message": f"Successfully {action}ed {process_name}"}), 200
+        else:
             return jsonify(result), 500
-
-        for _ in range(MAX_STATUS_CHECK_ATTEMPTS):
-            time.sleep(STATUS_CHECK_INTERVAL)
-            current_status = verify_process_status(process_name)
-
-            if action == "stop" and current_status is None:
-                broadcast_status_update()
-                return jsonify({
-                    "status": "success",
-                    "message": f"Successfully stopped {process_name}"
-                }), 200
-
-            if current_status and expected_status in current_status:
-                broadcast_status_update()
-                return jsonify({
-                    "status": "success",
-                    "message": f"Successfully {action}ed {process_name}"
-                }), 200
-
-        return jsonify({
-            "status": "error",
-            "message": f"Process did not reach {expected_status} state after {action}"
-        }), 500
 
     except Exception as e:
         logger.error(f"Error managing process {process_name}: {str(e)}")
-        return jsonify({
-            "status": "error",
-            "message": f"Error managing process: {str(e)}"
-        }), 500
+        return jsonify({"status": "error", "message": f"Error managing process: {str(e)}"}), 500
+
+# ── Batch Controls (Start All, Stop All, Restart All) ───────────
+@app.route('/supervisor/batch/<action>', methods=['POST'])
+@login_required
+def batch_manage_processes(action):
+    if action not in ["start_all", "stop_all", "restart_all"]:
+        return jsonify({"status": "error", "message": "Invalid batch action"}), 400
+
+    logger.info(f"Received batch action: {action}")
+    configured = get_configured_clusters()
+    results = {}
+
+    for cluster in configured:
+        safe_name = cluster['safe_name']
+        try:
+            if action == "start_all":
+                res = run_supervisor_command("start", safe_name)
+            elif action == "stop_all":
+                res = run_supervisor_command("stop", safe_name)
+            elif action == "restart_all":
+                res = run_supervisor_command("restart", safe_name)
+            results[safe_name] = res.get("status", "unknown")
+        except Exception as e:
+            results[safe_name] = f"error: {str(e)}"
+
+    broadcast_status_update()
+    return jsonify({
+        "status": "success",
+        "action": action,
+        "results": results,
+        "message": f"Batch {action} executed for {len(configured)} bots."
+    }), 200
 
 @app.route('/supervisor/log/<process_name>', methods=['GET'])
 @login_required
@@ -561,9 +585,10 @@ def download_supervisor_log(process_name):
         if not re.match(r'^[a-zA-Z0-9_\- ]+$', process_name):
             return jsonify({"status": "error", "message": "Invalid process name"}), 400
 
-        stdout_log = Path(SUPERVISOR_LOG_DIR) / f"{process_name}_out.log"
-        stderr_log = Path(SUPERVISOR_LOG_DIR) / f"{process_name}_err.log"
-        combined_log = Path(SUPERVISOR_LOG_DIR) / f"{process_name}_combined.log"
+        safe_name = process_name.replace(' ', '_')
+        stdout_log = Path(SUPERVISOR_LOG_DIR) / f"{safe_name}_out.log"
+        stderr_log = Path(SUPERVISOR_LOG_DIR) / f"{safe_name}_err.log"
+        combined_log = Path(SUPERVISOR_LOG_DIR) / f"{safe_name}_combined.log"
 
         if stdout_log.exists() or stderr_log.exists():
             with combined_log.open('w', encoding='utf-8') as outfile:
@@ -585,7 +610,7 @@ def download_supervisor_log(process_name):
                 str(combined_log),
                 mimetype='text/plain',
                 as_attachment=True,
-                download_name=f"{process_name}_combined.log"
+                download_name=f"{safe_name}_combined.log"
             )
         else:
             return jsonify({
@@ -595,6 +620,357 @@ def download_supervisor_log(process_name):
 
     except Exception as e:
         logger.error(f"Error accessing log files for {process_name}: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/supervisor/clear_failure/<process_name>', methods=['POST'])
+@login_required
+def clear_failure(process_name):
+    FAILURE_COUNTS[process_name] = 0
+    PAUSED_BY_SYSTEM.discard(process_name)
+    run_supervisor_command("start", process_name)
+    broadcast_status_update()
+    return jsonify({"status": "success", "message": f"Cleared failure state for {process_name}"})
+
+# ── Dynamic Bot Management API (Add, Edit, Delete, Pull, Exec) ─
+@app.route('/api/system/metrics', methods=['GET'])
+@login_required
+def api_system_metrics():
+    return jsonify(get_system_metrics()), 200
+
+@app.route('/api/bots', methods=['GET'])
+@login_required
+def api_list_bots():
+    clusters = get_configured_clusters()
+    return jsonify({"status": "success", "bots": clusters}), 200
+
+@app.route('/api/bots/add', methods=['POST'])
+@login_required
+def api_add_bot():
+    try:
+        data = request.get_json(force=True) or {}
+        bot_name = (data.get('bot_name') or '').strip()
+        git_url = (data.get('git_url') or '').strip()
+        branch = (data.get('branch') or 'main').strip()
+        run_command = (data.get('run_command') or 'bot.py').strip()
+        env_vars = data.get('env', {})
+        python_version = data.get('python_version')
+        cron = data.get('cron')
+        auto_start = data.get('auto_start', True)
+
+        if not bot_name or not re.match(r'^[a-zA-Z0-9_\-]+$', bot_name):
+            return jsonify({"status": "error", "message": "Bot name must contain only letters, numbers, hyphens or underscores"}), 400
+
+        if not git_url or not git_url.startswith(('http://', 'https://', 'git@')):
+            return jsonify({"status": "error", "message": "A valid Git URL is required"}), 400
+
+        slot = data.get('slot') or get_next_available_slot()
+        bot_data = {
+            "slot": slot,
+            "bot_name": bot_name,
+            "safe_name": bot_name.replace(" ", "_"),
+            "git_url": git_url,
+            "branch": branch,
+            "run_command": run_command,
+            "env": env_vars,
+            "python_version": python_version,
+            "cron": cron
+        }
+
+        save_cluster_to_env(slot, bot_data)
+
+        # Clone and write configuration in background or sync
+        try:
+            bot_dir, final_cmd = prepare_bot_environment(bot_data)
+            write_supervisor_config_file(bot_data, final_cmd)
+            if has_supervisorctl():
+                subprocess.run(["supervisorctl", "reread"], check=False)
+                subprocess.run(["supervisorctl", "update"], check=False)
+        except Exception as e:
+            logger.error(f"Error setting up bot environment: {e}")
+
+        if auto_start:
+            run_supervisor_command("start", bot_name)
+
+        broadcast_status_update()
+        return jsonify({
+            "status": "success",
+            "message": f"Bot {bot_name} successfully added to {slot}!",
+            "slot": slot
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error adding bot: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/bots/<slot>', methods=['GET'])
+@login_required
+def api_get_bot(slot):
+    clusters = get_configured_clusters()
+    match = next((c for c in clusters if c['slot'].upper() == slot.upper()), None)
+    if not match:
+        return jsonify({"status": "error", "message": f"Cluster {slot} not found"}), 404
+    return jsonify({"status": "success", "bot": match}), 200
+
+@app.route('/api/bots/update/<slot>', methods=['POST'])
+@login_required
+def api_update_bot(slot):
+    try:
+        data = request.get_json(force=True) or {}
+        clusters = get_configured_clusters()
+        existing = next((c for c in clusters if c['slot'].upper() == slot.upper()), None)
+        if not existing:
+            return jsonify({"status": "error", "message": f"Cluster {slot} not found"}), 404
+
+        bot_name = data.get('bot_name') or existing['bot_name']
+        git_url = data.get('git_url') or existing['git_url']
+        branch = data.get('branch') or existing['branch']
+        run_command = data.get('run_command') or existing['run_command']
+        env_vars = data.get('env', existing['env'])
+        python_version = data.get('python_version', existing.get('python_version'))
+        cron = data.get('cron', existing.get('cron'))
+
+        updated_data = {
+            "slot": slot,
+            "bot_name": bot_name,
+            "safe_name": bot_name.replace(" ", "_"),
+            "git_url": git_url,
+            "branch": branch,
+            "run_command": run_command,
+            "env": env_vars,
+            "python_version": python_version,
+            "cron": cron
+        }
+
+        save_cluster_to_env(slot, updated_data)
+
+        # Update supervisor config
+        try:
+            bot_dir, final_cmd = prepare_bot_environment(updated_data)
+            write_supervisor_config_file(updated_data, final_cmd)
+            if has_supervisorctl():
+                subprocess.run(["supervisorctl", "reread"], check=False)
+                subprocess.run(["supervisorctl", "update"], check=False)
+        except Exception as e:
+            logger.error(f"Error updating supervisor config: {e}")
+
+        broadcast_status_update()
+        return jsonify({
+            "status": "success",
+            "message": f"Bot {bot_name} ({slot}) updated successfully!"
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error updating bot {slot}: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/bots/delete/<slot>', methods=['POST', 'DELETE'])
+@login_required
+def api_delete_bot(slot):
+    try:
+        data = request.get_json(silent=True) or {}
+        clean_files = data.get('clean_files', False)
+
+        clusters = get_configured_clusters()
+        existing = next((c for c in clusters if c['slot'].upper() == slot.upper()), None)
+        if not existing:
+            return jsonify({"status": "error", "message": f"Cluster {slot} not found"}), 404
+
+        safe_name = existing['safe_name']
+        run_supervisor_command("stop", safe_name)
+
+        # Remove config file
+        conf_file = Path(SUPERVISORD_CONF_DIR) / f"{safe_name}.conf"
+        if conf_file.exists():
+            try:
+                conf_file.unlink()
+            except Exception:
+                pass
+
+        if has_supervisorctl():
+            subprocess.run(["supervisorctl", "reread"], check=False)
+            subprocess.run(["supervisorctl", "update"], check=False)
+
+        delete_cluster_from_env(slot)
+        delete_supervisor_logs(safe_name)
+
+        if clean_files:
+            bot_dir = APP_BASE_DIR / safe_name
+            if bot_dir.exists():
+                shutil.rmtree(bot_dir, ignore_errors=True)
+
+        broadcast_status_update()
+        return jsonify({
+            "status": "success",
+            "message": f"Bot {existing['bot_name']} ({slot}) removed successfully!"
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error deleting bot {slot}: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/bots/pull/<process_name>', methods=['POST'])
+@login_required
+def api_bot_git_pull(process_name):
+    try:
+        safe_name = process_name.replace(' ', '_')
+        bot_dir = APP_BASE_DIR / safe_name
+        if not bot_dir.exists():
+            return jsonify({"status": "error", "message": f"Bot directory {bot_dir} does not exist"}), 404
+
+        res = subprocess.run(["git", "pull"], cwd=bot_dir, capture_output=True, text=True, timeout=30)
+        output = (res.stdout + "\n" + res.stderr).strip()
+
+        # Restart bot to take changes
+        restart_res = run_supervisor_command("restart", process_name)
+        broadcast_status_update()
+
+        return jsonify({
+            "status": "success",
+            "git_output": output,
+            "restarted": restart_res.get("status") == "success",
+            "message": f"Pulled latest code for {process_name}."
+        }), 200
+    except Exception as e:
+        logger.error(f"Error in git pull for {process_name}: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/bots/rebuild_venv/<process_name>', methods=['POST'])
+@login_required
+def api_bot_rebuild_venv(process_name):
+    try:
+        safe_name = process_name.replace(' ', '_')
+        bot_dir = APP_BASE_DIR / safe_name
+        req_file = bot_dir / "requirements.txt"
+        if not req_file.exists():
+            return jsonify({"status": "error", "message": "No requirements.txt found in bot directory"}), 400
+
+        from app.utils.process_manager import get_venv_bin
+        pip_bin = str(get_venv_bin(bot_dir / "venv", "pip"))
+        res = subprocess.run([pip_bin, "install", "--no-cache-dir", "-r", str(req_file)],
+                             cwd=bot_dir, capture_output=True, text=True, timeout=120)
+        output = (res.stdout + "\n" + res.stderr).strip()
+        run_supervisor_command("restart", process_name)
+        broadcast_status_update()
+
+        return jsonify({
+            "status": "success",
+            "pip_output": output,
+            "message": f"Requirements reinstalled for {process_name}."
+        }), 200
+    except Exception as e:
+        logger.error(f"Error rebuilding venv for {process_name}: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/bots/exec/<process_name>', methods=['POST'])
+@login_required
+def api_bot_exec(process_name):
+    try:
+        data = request.get_json(force=True) or {}
+        command = (data.get("command") or "").strip()
+        if not command:
+            return jsonify({"status": "error", "message": "Command is required"}), 400
+
+        # Safety filter
+        forbidden = ["rm -rf /", ":(){ :|:& };:", "dd if=", "mkfs"]
+        if any(fb in command for fb in forbidden):
+            return jsonify({"status": "error", "message": "Command not allowed for safety"}), 400
+
+        safe_name = process_name.replace(' ', '_')
+        bot_dir = APP_BASE_DIR / safe_name
+        if not bot_dir.exists():
+            bot_dir = Path.cwd()
+
+        res = subprocess.run(command, shell=True, cwd=str(bot_dir), capture_output=True, text=True, timeout=15)
+        return jsonify({
+            "status": "success",
+            "stdout": res.stdout,
+            "stderr": res.stderr,
+            "exit_code": res.returncode
+        }), 200
+    except subprocess.TimeoutExpired:
+        return jsonify({"status": "error", "message": "Command execution timed out after 15 seconds"}), 408
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# ── General Settings & Telegram Alert API ─────────────────────
+@app.route('/api/settings', methods=['GET', 'POST'])
+@login_required
+def api_settings():
+    load_dotenv('cluster.env', override=True)
+    if request.method == 'POST':
+        data = request.get_json(force=True) or {}
+
+        if data.get('admin_username'):
+            update_general_setting("ADMIN_USERNAME", data['admin_username'])
+        if data.get('admin_password'):
+            update_general_setting("ADMIN_PASSWORD", data['admin_password'])
+        if 'app_url' in data:
+            update_general_setting("APP_URL", data['app_url'])
+        if 'ping_interval' in data:
+            update_general_setting("PING_INTERVAL", str(data['ping_interval']))
+        if 'cron_restart_hours' in data:
+            update_general_setting("CRON_RESTART_HOURS", str(data['cron_restart_hours']))
+        if 'telegram_token' in data:
+            update_general_setting("TELEGRAM_NOTIFY_TOKEN", data['telegram_token'])
+        if 'telegram_chat_id' in data:
+            update_general_setting("TELEGRAM_NOTIFY_CHAT_ID", data['telegram_chat_id'])
+
+        return jsonify({"status": "success", "message": "Settings saved successfully!"}), 200
+
+    return jsonify({
+        "status": "success",
+        "settings": {
+            "admin_username": os.environ.get("ADMIN_USERNAME", "admin"),
+            "app_url": os.environ.get("APP_URL", ""),
+            "ping_interval": int(os.environ.get("PING_INTERVAL", 240)),
+            "cron_restart_hours": int(os.environ.get("CRON_RESTART_HOURS", 0)),
+            "telegram_token_configured": bool(os.environ.get("TELEGRAM_NOTIFY_TOKEN")),
+            "telegram_chat_id": os.environ.get("TELEGRAM_NOTIFY_CHAT_ID", "")
+        }
+    }), 200
+
+@app.route('/api/notifications/test', methods=['POST'])
+@login_required
+def api_test_telegram():
+    success = send_telegram_alert("🔔 <b>BotClusters Test Notification</b>\nYour Telegram alert integration is configured and working perfectly!")
+    if success:
+        return jsonify({"status": "success", "message": "Test notification delivered successfully to Telegram!"}), 200
+    else:
+        return jsonify({"status": "error", "message": "Failed to send notification. Check token & chat ID."}), 400
+
+# ── Backup & Restore / Export & Import API ─────────────────────
+@app.route('/api/config/export', methods=['GET'])
+@login_required
+def api_export_config():
+    data = export_all_clusters()
+    mem_file = io.BytesIO(json.dumps(data, indent=2).encode('utf-8'))
+    return send_file(
+        mem_file,
+        mimetype='application/json',
+        as_attachment=True,
+        download_name=f"botclusters_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    )
+
+@app.route('/api/config/import', methods=['POST'])
+@login_required
+def api_import_config():
+    try:
+        if 'file' in request.files:
+            file = request.files['file']
+            data = json.load(file)
+        else:
+            data = request.get_json(force=True) or {}
+
+        imported, errors = import_clusters_from_dict(data)
+        broadcast_status_update()
+        return jsonify({
+            "status": "success",
+            "imported_count": imported,
+            "errors": errors,
+            "message": f"Successfully imported {imported} bot cluster(s)!"
+        }), 200
+    except Exception as e:
+        logger.error(f"Config import error: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 # ── Log Stream ──────────────────────────────────────────────────
@@ -653,19 +1029,10 @@ def config_cron():
         data = request.get_json(silent=True) or {}
         hours = int(data.get('hours', 0))
         CRON_RESTART_INTERVAL = max(0, hours)
-        os.environ['CRON_RESTART_HOURS'] = str(CRON_RESTART_INTERVAL)
+        update_general_setting('CRON_RESTART_HOURS', str(CRON_RESTART_INTERVAL))
         _restart_cron_thread()
         return jsonify({"status": "success", "hours": CRON_RESTART_INTERVAL})
     return jsonify({"status": "success", "hours": CRON_RESTART_INTERVAL})
-
-@app.route('/supervisor/clear_failure/<process_name>', methods=['POST'])
-@login_required
-def clear_failure(process_name):
-    FAILURE_COUNTS[process_name] = 0
-    PAUSED_BY_SYSTEM.discard(process_name)
-    run_supervisor_command("start", process_name)
-    broadcast_status_update()
-    return jsonify({"status": "success", "message": f"Cleared failure state for {process_name}"})
 
 def _cron_restart_loop():
     while True:
@@ -741,36 +1108,8 @@ def handle_status_request():
         return
 
     try:
-        status = run_supervisor_command("status")
-        if status["status"] == "success":
-            processes = []
-            for proc in status["message"].splitlines():
-                parsed_proc = parse_supervisor_status(proc)
-                if parsed_proc:
-                    pname = parsed_proc["name"]
-                    if parsed_proc["status"] in ("FATAL", "BACKOFF", "EXITED"):
-                        FAILURE_COUNTS[pname] += 1
-                        if FAILURE_COUNTS[pname] >= MAX_FAILURES_BEFORE_PAUSE:
-                            PAUSED_BY_SYSTEM.add(pname)
-                        parsed_proc["auto_paused"] = pname in PAUSED_BY_SYSTEM
-                    else:
-                        if parsed_proc["status"] == "RUNNING":
-                            FAILURE_COUNTS[pname] = 0
-                            PAUSED_BY_SYSTEM.discard(pname)
-                        parsed_proc["auto_paused"] = pname in PAUSED_BY_SYSTEM
-                    processes.append(parsed_proc)
-
-            emit('status_update', {
-                "status": "success",
-                "processes": processes,
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            })
-        else:
-            emit('status_update', {
-                "status": "error",
-                "message": status["message"],
-                "processes": []
-            })
+        payload = build_process_status_payload()
+        emit('status_update', payload)
     except Exception as e:
         logger.error(f"Error in handle_status_request: {str(e)}")
         emit('status_update', {

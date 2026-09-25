@@ -1,4 +1,4 @@
-## 🎓 ***BotClusters v7.5***
+## 🎓 ***BotClusters v8.0***
 
 > **Maintainer:** [Goutham Josh](https://github.com/GouthamJosh)  
 > **Original Developer / Contributor:** [MysteryDemon](https://github.com/mysterydemon)
@@ -10,16 +10,22 @@ Have you encountered the problem where you have to host resource-efficient Teleg
 ---
 
 ## 🔰 ***Repo Features***
+- 🤖 **Web GUI Bot Manager**: *Add, configure, edit, clone, and delete bot clusters directly from the dashboard without editing config files*
+- 📊 **Real-Time Resource Metrics**: *Live gauges for CPU load %, host RAM usage (MB / %), and Disk space*
+- ⚡ **Per-Process Telemetry**: *Track memory consumption (RSS MB), CPU %, uptime, and PID for each bot individually*
+- 🎛️ **Batch Cluster Operations**: *One-click "Start All", "Stop All", and "Restart All" cluster management*
+- 💻 **Integrated Bot Console / Terminal**: *Execute diagnostic shell commands (`pip list`, `git status`, `python -c ...`) inside any bot directory*
+- ⬇️ **One-Click Git Pull & Reload**: *Pull latest commits from bot repositories on demand without full server rebuilds*
+- 📢 **Telegram Crash Alerts**: *Instant Telegram notifications if a bot repeatedly crashes or enters auto-pause*
+- 💾 **Cluster Backup & Restore**: *Export all bot definitions and environment settings to JSON and restore anytime*
+- 📜 **Advanced Log Streaming**: *Real-time SSE log stream with process filtering, STDOUT/STDERR isolation, live search, and file export*
 - 🔄 **Auto Updates**: *Optional automatic updates through GitHub on restart*
-- 🔌 **Extensible**: *Add unlimited bots by simply including more configuration objects*
-- 🌐 **Interactive Dashboard**: *Real-time web interface for bot monitoring and control*
-- 🛡️ **Reliable Process Management**: *Powered by supervisord for automated process supervision with smart auto-pause recovery*
-- 🔐 **Environment Control**: *Set unique ENV values for each bot*
-- 🎮 **Custom Execution**: *Configure custom script paths for bot initialization (`bot.py`, `main.py`, `start.sh`)*
+- 🛡️ **Reliable Process Management**: *Powered by supervisord with automated process supervision and smart auto-pause recovery*
+- 🔐 **Environment Control**: *Configure key-value environment variables per bot directly in the visual editor*
+- 🎮 **Custom Execution**: *Configure custom entry scripts (`bot.py`, `main.py`, `app.py`, `start.sh`)*
 - 🔒 **Private Repo Support**: *Clone and run bots from private repositories using GitHub tokens*
-- 📦 **Custom Installation**: *Custom installation of system packages and pip packages in `install.sh`*
-- 🎛️ **Cloud Integration**: *Ready for deployment on Render, Koyeb, Heroku, Docker, and GitHub Codespaces*
-- 🐍 **Multi-Python Support**: *Supports specific Python versions per bot*
+- 🎛️ **Cloud & Cross-Platform Integration**: *Ready for Render, Koyeb, Heroku, Docker, Codespaces, and standalone local environments*
+- 🐍 **Multi-Python Support**: *Supports specific Python versions (`3.8` to `3.13`)*
 
 ---
 
