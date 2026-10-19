@@ -369,7 +369,7 @@ def export_all_clusters() -> dict:
         "TELEGRAM_NOTIFY_CHAT_ID": os.environ.get("TELEGRAM_NOTIFY_CHAT_ID", ""),
     }
     return {
-        "version": "8.0",
+        "version": "8.1",
         "exported_at": datetime.now(timezone.utc).isoformat(),
         "settings": settings,
         "clusters": clusters

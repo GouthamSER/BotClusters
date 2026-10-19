@@ -1,5 +1,5 @@
 /**
- * BotClusters Pro 8.0 - Client Interactive Controller
+ * BotClusters Pro 8.1 - Client Interactive Controller
  * Maintainer: Goutham Josh
  */
 
