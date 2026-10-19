@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import shutil
+import signal
 import logging
 import threading
 import subprocess
@@ -12,71 +13,85 @@ logging.basicConfig(
 )
 logger = logging.getLogger("cluster")
 
-def run_update():
-    logger.info("Running update check...")
-    try:
-        subprocess.run([sys.executable, "update.py"])
-    except Exception as e:
-        logger.error(f"Error running update.py: {e}")
+CHILDREN = {}          # name -> Popen
+_stopping = False
 
-def run_web_server():
-    port = os.environ.get("PORT", "5000")
-    logger.info(f"Starting web server via run.py on port {port}...")
+
+def spawn(name, cmd):
+    """Start a child process and remember it so it can be stopped on shutdown."""
     try:
-        subprocess.run([sys.executable, "run.py"])
+        CHILDREN[name] = subprocess.Popen(cmd)
+        return CHILDREN[name]
     except Exception as e:
-        logger.error(f"Web server failed: {e}")
+        logger.error(f"{name} failed to start: {e}")
+        return None
+
+
+def run_blocking(name, cmd):
+    proc = spawn(name, cmd)
+    if proc:
+        proc.wait()
+        if not _stopping and proc.returncode not in (0, None):
+            logger.error(f"{name} exited with code {proc.returncode}")
+
+
+def run_update_then_worker():
+    """Order matters: update first (it may replace files), then set up bots from the NEW code."""
+    run_blocking("update", [sys.executable, "update.py"])
+    run_blocking("worker", [sys.executable, "worker.py"])
+
 
 def run_supervisord():
     if shutil.which("supervisord"):
         logger.info("Starting supervisord daemon...")
-        try:
-            subprocess.run(["supervisord", "-n", "-c", "supervisord.conf"])
-        except Exception as e:
-            logger.error(f"Supervisord failed: {e}")
+        run_blocking("supervisord", ["supervisord", "-n", "-c", "supervisord.conf"])
     else:
-        logger.warning("supervisord is not installed in PATH. Bot supervisor service skipped.")
+        logger.warning("supervisord is not installed in PATH. Bot supervisor service skipped "
+                       "(dashboard falls back to its built-in process runner).")
 
-def run_worker():
-    logger.info("Starting bot worker manager...")
-    try:
-        subprocess.run([sys.executable, "worker.py"])
-    except Exception as e:
-        logger.error(f"Worker failed: {e}")
 
-def run_ping_server():
-    try:
-        subprocess.run([sys.executable, "ping_server.py"])
-    except Exception as e:
-        logger.error(f"Ping server failed: {e}")
+def stop_children():
+    global _stopping
+    if _stopping:
+        return
+    _stopping = True
+    logger.info("Shutting down BotClusters gracefully...")
+    for name, proc in CHILDREN.items():
+        if proc.poll() is None:
+            proc.terminate()
+    deadline = time.time() + 15
+    for proc in CHILDREN.values():
+        try:
+            proc.wait(timeout=max(0.1, deadline - time.time()))
+        except Exception:
+            proc.kill()
+
+
+def shutdown(signum=None, frame=None):
+    stop_children()
+    sys.exit(0)
+
 
 if __name__ == "__main__":
     logger.info("Initializing BotClusters...")
+    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT, shutdown)
 
-    # Start the web server immediately so Koyeb/Render health check probes succeed instantly
-    web_server_thread = threading.Thread(target=run_web_server, name="WebServerThread", daemon=True)
-    web_server_thread.start()
+    # Web server first so Koyeb/Render health checks pass immediately
+    web = spawn("web", [sys.executable, "run.py"])
+    port = os.environ.get("PORT", "5000")
+    logger.info(f"Web server started on port {port}")
 
-    # Background support services
-    threads = [
-        web_server_thread,
-        threading.Thread(target=run_update, name="UpdateThread", daemon=True),
-        threading.Thread(target=run_supervisord, name="SupervisorThread", daemon=True),
-        threading.Thread(target=run_worker, name="WorkerThread", daemon=True),
-        threading.Thread(target=run_ping_server, name="PingServerThread", daemon=True)
-    ]
+    for name, target in (("supervisord", run_supervisord),
+                         ("setup", run_update_then_worker),
+                         ("ping", lambda: run_blocking("ping", [sys.executable, "ping_server.py"]))):
+        threading.Thread(target=target, name=name, daemon=True).start()
 
-    for t in threads[1:]:
-        t.start()
+    logger.info("All BotClusters background services started.")
 
-    logger.info("All BotClusters background services started successfully.")
-
-    try:
-        while True:
-            time.sleep(1)
-            # If web server dies, exit
-            if not threads[0].is_alive():
-                logger.error("Web server thread stopped unexpectedly.")
-                break
-    except KeyboardInterrupt:
-        logger.info("Shutting down BotClusters gracefully...")
+    while True:
+        time.sleep(1)
+        if web is None or web.poll() is not None:
+            logger.error("Web server stopped unexpectedly - exiting so the platform restarts the container.")
+            stop_children()
+            sys.exit(1)

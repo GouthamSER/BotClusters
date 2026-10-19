@@ -1,4 +1,4 @@
-## 🎓 ***BotClusters v8.0***
+## 🎓 ***BotClusters v8.1***
 
 > **Maintainer:** [Goutham Josh](https://github.com/GouthamJosh)  
 > **Original Developer / Contributor:** [MysteryDemon](https://github.com/mysterydemon)
@@ -46,7 +46,7 @@ Have you encountered the problem where you have to host resource-efficient Teleg
 | `run_command` | Bot execution command (`bot.py`, `main.py`, `start.sh`) | ✅ |
 | `env` | Environment variables dictionary | ❌ |
 | `python_version` | Custom Python Version (e.g. `3.9`, `3.10`, `3.11`) | ❌ |
-| `cron` | Restart cron schedule | ❌ |
+| `cron` | Auto-restart cron schedule, e.g. `0 */6 * * *` (7th item; or set it in the bot form) | ❌ |
 
 ---
 
@@ -109,14 +109,32 @@ Have you encountered the problem where you have to host resource-efficient Teleg
 
 ---
 
+## 🆕 ***What changed in 8.1 (bug-fix release)***
+* Live dashboard updates work again (`broadcast=` socket error fixed).
+* Bots no longer vanish / show STOPPED when one bot is down (`supervisorctl status` exit code 3).
+* `worker.py` now uses the same names/paths as the dashboard (no random name prefix), sets up ALL `CLUSTER_xx` (not only 30), and one bad repo no longer blocks the rest.
+* `update.py` no longer deletes/overwrites `cluster.env`.
+* Random per-install session secret, login lockout, constant-time password check.
+* Clone / pip install runs in background with an *Installing…* / *Setup failed* card state.
+* Per-bot cron restart now really works; global schedule only restarts bots that are running.
+* Crash alerts (Telegram) fire even with no browser open; real CPU %; container-aware RAM gauge.
+* Reserved bot names (`app`, `bots`, …) blocked - they could wipe dashboard files.
+
+## ✨ ***New in 8.1 (features)***
+* 📈 **RAM sparkline + restart counter** on every bot card (spot crash loops / memory leaks).
+* ⏪ **Versions**: last commits per bot, one-click **rollback** (and roll forward).
+* 🔗 **GitHub webhook auto-deploy**: copy the per-bot URL from *Versions* into GitHub → Webhooks (push). Push = pull + restart.
+* ⬇ **Auto-pull schedule** (Settings → minutes): restarts a running bot only when its repo has new commits.
+* 👁 **Secret-masked env editor**: tokens/keys/passwords hidden until you click the eye.
+* ⧉ **Clone bot**: copy a bot's settings into a new one.
+
 ## 📝 ***Notes***
 * Ensure all your bots are compatible with Python (or bash).
 * It is not compulsory to set a Python version; only set it if your bot specifically requires an older/newer interpreter.
 * Keep your tokens and sensitive information secure in `cluster.env`.
 * If your bot needs additional system or pip packages, define them in `install.sh`.
 * **GUI login details (configurable via `ADMIN_USERNAME` and `ADMIN_PASSWORD`):**
-  * `Username`: `admin`
-  * `Password`: `password123`
+  * Default `admin` / `password123` - **change it in Settings right after first login** (dashboard warns you).
 
 ---
 

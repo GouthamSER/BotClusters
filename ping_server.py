@@ -50,26 +50,30 @@ def ping_url(session, url):
         return False
 
 def main():
-    app_url = get_app_url()
-    if not app_url:
-        logger.info("No APP_URL provided. Ping server is disabled.")
-        sys.exit(0)
-
-    ping_interval = get_ping_interval()
-    logger.info(f"Starting ping service for {app_url} every {ping_interval} seconds ({ping_interval / 60:.1f} mins)...")
-
+    logger.info("Ping service started (reads APP_URL / PING_INTERVAL from cluster.env on every cycle).")
     if should_delay_ping():
         delay_seconds = get_delay()
         logger.info(f"Delaying start of pinging by {delay_seconds} seconds as per DELAY_PING setting.")
         time.sleep(delay_seconds)
 
     failure_count = 0
+    warned_no_url = False
 
     with requests.Session() as session:
         try:
             while True:
-                success = ping_url(session, app_url)
-                if success:
+                # Re-read settings each cycle so URL / interval changed in the dashboard apply without restart
+                load_dotenv('cluster.env', override=True)
+                app_url = get_app_url()
+                if not app_url:
+                    if not warned_no_url:
+                        logger.info("No APP_URL set - ping disabled until you set it in Settings.")
+                        warned_no_url = True
+                    time.sleep(30)
+                    continue
+                warned_no_url = False
+
+                if ping_url(session, app_url):
                     failure_count = 0
                 else:
                     failure_count += 1
@@ -78,9 +82,10 @@ def main():
                         time.sleep(600)
                         failure_count = 0
                         continue
-                time.sleep(ping_interval)
+                time.sleep(max(30, get_ping_interval()))
         except KeyboardInterrupt:
             logger.info("Ping process interrupted by user.")
+
 
 if __name__ == "__main__":
     main()

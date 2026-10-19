@@ -6,13 +6,14 @@ import shutil
 import signal
 import logging
 import psutil
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Dict, Any, Optional
 
 from app.utils.cluster_config import (
     APP_BASE_DIR, SUPERVISORD_CONF_DIR, SUPERVISOR_LOG_DIR,
-    get_configured_clusters
+    get_configured_clusters, mask_url, invalidate_git_cache
 )
 
 logger = logging.getLogger(__name__)
@@ -23,15 +24,60 @@ _DEV_PROCESSES: Dict[str, Dict[str, Any]] = {}
 def has_supervisorctl() -> bool:
     return shutil.which("supervisorctl") is not None
 
+def _read_int(path: str) -> Optional[int]:
+    try:
+        raw = Path(path).read_text().strip()
+        if raw and raw != "max":
+            return int(raw)
+    except Exception:
+        pass
+    return None
+
+
+def _cgroup_memory() -> Optional[Dict[str, int]]:
+    """Container memory limit/usage in bytes (Koyeb/Render/Docker), else None."""
+    total = psutil.virtual_memory().total
+    limit = _read_int("/sys/fs/cgroup/memory.max") or _read_int("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+    used = _read_int("/sys/fs/cgroup/memory.current") or _read_int("/sys/fs/cgroup/memory/memory.usage_in_bytes")
+    if not limit or not used or limit >= total:
+        return None
+    # page cache is reclaimable -> do not count it as "used"
+    for stat_file, key in (("/sys/fs/cgroup/memory.stat", "inactive_file"),
+                           ("/sys/fs/cgroup/memory/memory.stat", "total_inactive_file")):
+        try:
+            for line in Path(stat_file).read_text().splitlines():
+                k, _, v = line.partition(" ")
+                if k == key:
+                    used = max(0, used - int(v))
+                    break
+            break
+        except Exception:
+            continue
+    return {"limit": limit, "used": min(used, limit)}
+
+
+def _format_uptime(seconds: int) -> str:
+    d, rem = divmod(seconds, 86400)
+    h, rem = divmod(rem, 3600)
+    m = rem // 60
+    return f"{d}d {h}h {m}m" if d else f"{h}h {m}m"
+
+
 def get_system_metrics() -> Dict[str, Any]:
-    """Retrieve live CPU, Memory, Disk and Host performance metrics."""
+    """Live CPU, memory (container-aware), disk and uptime."""
     try:
         cpu_percent = psutil.cpu_percent(interval=None)
         vm = psutil.virtual_memory()
-        total_ram_mb = round(vm.total / (1024 * 1024))
-        used_ram_mb = round(vm.used / (1024 * 1024))
-        free_ram_mb = round(vm.available / (1024 * 1024))
-        ram_percent = vm.percent
+        cg = _cgroup_memory()
+        if cg:
+            total_ram_mb = round(cg["limit"] / (1024 * 1024))
+            used_ram_mb = round(cg["used"] / (1024 * 1024))
+            ram_percent = round(cg["used"] * 100 / cg["limit"], 1)
+        else:
+            total_ram_mb = round(vm.total / (1024 * 1024))
+            used_ram_mb = round((vm.total - vm.available) / (1024 * 1024))
+            ram_percent = vm.percent
+        free_ram_mb = max(0, total_ram_mb - used_ram_mb)
 
         try:
             disk = psutil.disk_usage(str(Path.cwd()))
@@ -39,15 +85,14 @@ def get_system_metrics() -> Dict[str, Any]:
             used_disk_gb = round(disk.used / (1024 ** 3), 1)
             disk_percent = disk.percent
         except Exception:
-            total_disk_gb = 0
-            used_disk_gb = 0
-            disk_percent = 0
+            total_disk_gb = used_disk_gb = disk_percent = 0
 
-        boot_time = psutil.boot_time()
-        uptime_seconds = int(time.time() - boot_time)
-        hours, remainder = divmod(uptime_seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        uptime_str = f"{hours}h {minutes}m"
+        try:
+            # PID 1 start = container start (host boot time is misleading in Docker)
+            started = psutil.Process(1).create_time()
+        except Exception:
+            started = psutil.boot_time()
+        uptime_str = _format_uptime(max(0, int(time.time() - started)))
 
         return {
             "cpu_percent": cpu_percent,
@@ -55,6 +100,7 @@ def get_system_metrics() -> Dict[str, Any]:
             "ram_used_mb": used_ram_mb,
             "ram_free_mb": free_ram_mb,
             "ram_percent": ram_percent,
+            "ram_is_container_limit": bool(cg),
             "disk_total_gb": total_disk_gb,
             "disk_used_gb": used_disk_gb,
             "disk_percent": disk_percent,
@@ -65,39 +111,49 @@ def get_system_metrics() -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"Error reading system metrics: {e}")
         return {
-            "cpu_percent": 0,
-            "ram_total_mb": 0,
-            "ram_used_mb": 0,
-            "ram_percent": 0,
-            "disk_total_gb": 0,
-            "disk_used_gb": 0,
-            "disk_percent": 0,
-            "uptime": "N/A",
-            "python_version": sys.version.split()[0],
-            "platform": sys.platform
+            "cpu_percent": 0, "ram_total_mb": 0, "ram_used_mb": 0, "ram_free_mb": 0,
+            "ram_percent": 0, "disk_total_gb": 0, "disk_used_gb": 0, "disk_percent": 0,
+            "uptime": "N/A", "python_version": sys.version.split()[0], "platform": sys.platform
         }
 
+
+# psutil needs the SAME Process object between calls, otherwise cpu_percent() is always 0.0
+_PROC_CACHE: Dict[int, "psutil.Process"] = {}
+
+
+def _get_proc(pid: int) -> "psutil.Process":
+    proc = _PROC_CACHE.get(pid)
+    if proc is None:
+        proc = psutil.Process(pid)
+        proc.cpu_percent(interval=None)  # prime
+        _PROC_CACHE[pid] = proc
+        if len(_PROC_CACHE) > 200:
+            for dead in [k for k, v in _PROC_CACHE.items() if not v.is_running()]:
+                _PROC_CACHE.pop(dead, None)
+    return proc
+
+
 def get_process_resource_usage(pid: Optional[int]) -> Dict[str, Any]:
-    """Retrieve memory in MB (RSS) and CPU percent for a given PID."""
+    """RSS memory (MB) and CPU % for a PID, including child processes."""
     if not pid:
         return {"memory_mb": 0, "cpu_percent": 0}
     try:
-        proc = psutil.Process(int(pid))
-        mem_info = proc.memory_info()
-        mem_mb = round(mem_info.rss / (1024 * 1024), 1)
-
-        # Include child processes memory (e.g. if bot forks)
+        proc = _get_proc(int(pid))
+        mem = proc.memory_info().rss
+        cpu = proc.cpu_percent(interval=None)
         try:
             for child in proc.children(recursive=True):
-                mem_mb += round(child.memory_info().rss / (1024 * 1024), 1)
+                try:
+                    c = _get_proc(child.pid)
+                    mem += c.memory_info().rss
+                    cpu += c.cpu_percent(interval=None)
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
         except Exception:
             pass
-
-        return {
-            "memory_mb": mem_mb,
-            "cpu_percent": proc.cpu_percent(interval=None)
-        }
+        return {"memory_mb": round(mem / (1024 * 1024), 1), "cpu_percent": round(cpu, 1)}
     except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
+        _PROC_CACHE.pop(int(pid), None) if str(pid).isdigit() else None
         return {"memory_mb": 0, "cpu_percent": 0}
 
 def get_venv_bin(venv_dir: Path, bin_name: str) -> Path:
@@ -112,144 +168,226 @@ def get_venv_bin(venv_dir: Path, bin_name: str) -> Path:
     primary = venv_dir / ('Scripts' if is_windows else 'bin')
     return primary / (f"{bin_name}.exe" if is_windows else bin_name)
 
-def prepare_bot_environment(cluster: dict) -> tuple[Path, str]:
-    """Clone repository and setup virtualenv if needed, returns (bot_dir, run_command_str)."""
+def get_pyenv_python(version: Optional[str]) -> str:
+    """Interpreter for a requested python version (e.g. '3.11'), else current one."""
+    default = sys.executable or shutil.which("python3") or "python3"
+    if not version:
+        return default
+    major_minor = '.'.join(str(version).split('.')[:2])
+    shim = shutil.which(f"python{major_minor}")
+    if shim:
+        return shim
+    logger.warning(f"python{major_minor} not found in PATH, falling back to {default}")
+    return default
+
+
+def _run(cmd, **kw):
+    """subprocess.run that raises RuntimeError with the real stderr (not just 'exit status 1')."""
+    res = subprocess.run(cmd, capture_output=True, text=True, **kw)
+    if res.returncode != 0:
+        tail = (res.stderr or res.stdout or "").strip()[-600:]
+        raise RuntimeError(f"{mask_url(' '.join(map(str, cmd[:4])))} failed: {mask_url(tail)}")
+    return res
+
+
+def install_requirements(bot_dir: Path, python_version: Optional[str] = None) -> str:
+    """Create venv if missing and pip install requirements. Returns pip output."""
+    venv_dir = bot_dir / 'venv'
+    req = bot_dir / 'requirements.txt'
+    if not req.exists():
+        return "No requirements.txt"
+    env = os.environ.copy()
+    if python_version:
+        env["PYENV_VERSION"] = str(python_version)
+    try:
+        if not venv_dir.exists():
+            _run([get_pyenv_python(python_version), '-m', 'venv', str(venv_dir)], env=env, timeout=300)
+        res = _run([str(get_venv_bin(venv_dir, 'pip')), 'install', '--no-cache-dir', '-r', str(req)],
+                   cwd=str(bot_dir), env=env, timeout=1800)
+        return (res.stdout or "")[-2000:]
+    except Exception:
+        # half-built venv would be skipped forever on the next start -> remove it
+        shutil.rmtree(venv_dir, ignore_errors=True)
+        raise
+
+
+def build_run_command(run_cmd: str, bot_dir: Path, py: str) -> str:
+    """Turn the configured run_command into a shell command line."""
+    parts = shlex.split(run_cmd.strip() or 'bot.py', posix=True)
+    first, rest = parts[0], parts[1:]
+    q = shlex.quote
+    if first in ("python", "python3", "py"):
+        return " ".join([q(py)] + [q(x) for x in rest])
+    if first.endswith(".sh"):
+        return " ".join(["bash", q((bot_dir / first).as_posix())] + [q(x) for x in rest])
+    if first.endswith(".py"):
+        return " ".join([q(py), q((bot_dir / first).as_posix())] + [q(x) for x in rest])
+    if first == "-m" and rest:
+        return " ".join([q(py), "-m"] + [q(x) for x in rest])
+    return " ".join([q(py), "-m", q(Path(first).stem)] + [q(x) for x in rest])
+
+
+def prepare_bot_environment(cluster: dict, force_reclone: bool = False) -> tuple[Path, str]:
+    """Clone repo + build venv if needed. Returns (bot_dir, run_command_str). Raises RuntimeError on failure."""
     bot_name = cluster['bot_name']
     safe_name = cluster.get('safe_name', bot_name.replace(" ", "_"))
     bot_dir = APP_BASE_DIR / safe_name
     venv_dir = bot_dir / 'venv'
-    branch = cluster.get('branch', 'main')
+    branch = cluster.get('branch') or 'main'
     git_url = cluster.get('git_url', '')
+    python_version = cluster.get("python_version")
 
     bot_dir.parent.mkdir(parents=True, exist_ok=True)
 
+    if force_reclone and bot_dir.exists():
+        shutil.rmtree(bot_dir, ignore_errors=True)
+        invalidate_git_cache(bot_dir)
+
     if not (bot_dir / '.git').exists() and git_url:
-        logger.info(f"Cloning {bot_name} from {git_url} branch {branch} into {bot_dir}")
+        logger.info(f"Cloning {bot_name} from {mask_url(git_url)} branch {branch} into {bot_dir}")
         if bot_dir.exists():
             shutil.rmtree(bot_dir, ignore_errors=True)
-        subprocess.run(['git', 'clone', '-b', branch, '--single-branch', git_url, str(bot_dir)], check=True)
+        _run(['git', 'clone', '-b', branch, '--single-branch', git_url, str(bot_dir)], timeout=600)
+        invalidate_git_cache(bot_dir)
 
-    requirements_file = bot_dir / 'requirements.txt'
-    python_version = cluster.get("python_version")
-    python_exec = sys.executable or shutil.which("python3") or "python3"
-
-    if requirements_file.exists() and not venv_dir.exists():
+    if (bot_dir / 'requirements.txt').exists() and not venv_dir.exists():
         logger.info(f"Creating venv for {bot_name}...")
-        subprocess.run([python_exec, '-m', 'venv', str(venv_dir)], check=True)
-        pip_bin = str(get_venv_bin(venv_dir, 'pip'))
-        subprocess.run([pip_bin, 'install', '--no-cache-dir', '-r', str(requirements_file)], check=True)
+        install_requirements(bot_dir, python_version)
 
-    # Determine command
-    venv_python = get_venv_bin(venv_dir, 'python')
-    py_to_run = venv_python.as_posix() if venv_dir.exists() else python_exec
+    py = get_venv_bin(venv_dir, 'python').as_posix() if venv_dir.exists() else get_pyenv_python(python_version)
+    run_cmd = cluster.get('run_command') or 'bot.py'
+    return bot_dir, build_run_command(run_cmd, bot_dir, py)
 
-    run_cmd = cluster.get('run_command', 'bot.py')
-    bot_file = bot_dir / run_cmd
 
-    if run_cmd.endswith(".sh"):
-        final_cmd = f"bash {bot_file.as_posix()}"
-    elif run_cmd.endswith(".py"):
-        final_cmd = f"{py_to_run} {bot_file.as_posix()}"
-    else:
-        # e.g. python -m something
-        final_cmd = f"{py_to_run} -m {Path(run_cmd).stem}"
+_ENV_KEY_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 
-    return bot_dir, final_cmd
 
-def write_supervisor_config_file(cluster: dict, command: str) -> Path:
+def _supervisor_env_string(env: dict) -> str:
+    """Build a supervisor `environment=` value. Handles % (supervisor interpolation) and quotes."""
+    pairs = []
+    for k, v in (env or {}).items():
+        k, v = str(k).strip(), str(v)
+        if not _ENV_KEY_RE.match(k):
+            raise ValueError(f"Bad env variable name: '{k}'")
+        if "\n" in v or "\r" in v:
+            raise ValueError(f"Env variable {k} contains a line break")
+        v = v.replace('%', '%%')
+        if '"' not in v:
+            pairs.append(f'{k}="{v}"')
+        elif "'" not in v:
+            pairs.append(f"{k}='{v}'")
+        else:
+            raise ValueError(f"Env variable {k} contains both ' and \" - not supported")
+    return ','.join(pairs)
+
+
+def write_supervisor_config_file(cluster: dict, command: str, autostart: bool = True) -> Path:
     safe_name = cluster.get('safe_name', cluster['bot_name'].replace(" ", "_"))
     SUPERVISORD_CONF_DIR.mkdir(parents=True, exist_ok=True)
     SUPERVISOR_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     config_path = SUPERVISORD_CONF_DIR / f"{safe_name}.conf"
     bot_dir = APP_BASE_DIR / safe_name
-    env_vars = ','.join([f'{k}="{v}"' for k, v in cluster.get('env', {}).items()]) if cluster.get('env') else ""
+    env_vars = _supervisor_env_string(cluster.get('env') or {})
 
     stdout_path = (SUPERVISOR_LOG_DIR / f"{safe_name}_out.log").as_posix()
     stderr_path = (SUPERVISOR_LOG_DIR / f"{safe_name}_err.log").as_posix()
 
-    content = f"""[program:{safe_name}]
-command={command}
-directory={bot_dir.as_posix()}
-autostart=true
-autorestart=true
-startretries=12
-stderr_logfile={stderr_path}
-stdout_logfile={stdout_path}
-{f"environment={env_vars}" if env_vars else ""}
-"""
-    config_path.write_text(content.strip(), encoding="utf-8")
+    lines = [
+        f"[program:{safe_name}]",
+        f"command={command}",
+        f"directory={bot_dir.as_posix()}",
+        f"autostart={'true' if autostart else 'false'}",
+        "autorestart=true",
+        "startretries=12",
+        "stopasgroup=true",      # kill bot's child processes too (no orphans on restart)
+        "killasgroup=true",
+        "stopwaitsecs=10",
+        "stdout_logfile_maxbytes=10MB",
+        "stdout_logfile_backups=1",
+        "stderr_logfile_maxbytes=10MB",
+        "stderr_logfile_backups=1",
+        f"stderr_logfile={stderr_path}",
+        f"stdout_logfile={stdout_path}",
+    ]
+    if env_vars:
+        lines.append(f"environment={env_vars}")
+    config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return config_path
 
-# Fallback runner implementation for systems without supervisorctl
+
+def remove_supervisor_config(safe_name: str):
+    conf = SUPERVISORD_CONF_DIR / f"{safe_name}.conf"
+    try:
+        conf.unlink()
+    except FileNotFoundError:
+        pass
+
+
+# Fallback runner for systems without supervisorctl (Windows / local dev)
 def _fallback_start(process_name: str) -> Dict[str, Any]:
-    global _DEV_PROCESSES
     clusters = get_configured_clusters()
     match = next((c for c in clusters if c['safe_name'] == process_name or c['bot_name'] == process_name), None)
     if not match:
         return {"status": "error", "message": f"Cluster not configured: {process_name}"}
+    name = match['safe_name']
 
-    bot_dir, command = prepare_bot_environment(match)
+    old = _DEV_PROCESSES.get(name)
+    if old and old["proc"].poll() is None:
+        return {"status": "success", "message": f"{name} already running (PID: {old['pid']})"}
+
+    try:
+        bot_dir, command = prepare_bot_environment(match)
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
     SUPERVISOR_LOG_DIR.mkdir(parents=True, exist_ok=True)
-    stdout_f = open(SUPERVISOR_LOG_DIR / f"{process_name}_out.log", "a", encoding="utf-8", errors="replace")
-    stderr_f = open(SUPERVISOR_LOG_DIR / f"{process_name}_err.log", "a", encoding="utf-8", errors="replace")
-
     env = os.environ.copy()
-    for k, v in match.get('env', {}).items():
+    for k, v in (match.get('env') or {}).items():
         env[str(k)] = str(v)
 
-    proc = subprocess.Popen(
-        command,
-        shell=True,
-        cwd=str(bot_dir),
-        stdout=stdout_f,
-        stderr=stderr_f,
-        env=env
-    )
-    _DEV_PROCESSES[process_name] = {
-        "proc": proc,
-        "pid": proc.pid,
-        "start_time": time.time(),
-        "status": "RUNNING",
-        "command": command
-    }
-    return {"status": "success", "message": f"Started {process_name} (PID: {proc.pid})"}
+    with open(SUPERVISOR_LOG_DIR / f"{name}_out.log", "ab") as out_f, \
+         open(SUPERVISOR_LOG_DIR / f"{name}_err.log", "ab") as err_f:
+        proc = subprocess.Popen(command, shell=True, cwd=str(bot_dir), stdout=out_f, stderr=err_f, env=env)
+    _DEV_PROCESSES[name] = {"proc": proc, "pid": proc.pid, "start_time": time.time(), "command": command}
+    return {"status": "success", "message": f"Started {name} (PID: {proc.pid})"}
+
 
 def _fallback_stop(process_name: str) -> Dict[str, Any]:
-    global _DEV_PROCESSES
-    if process_name in _DEV_PROCESSES:
-        info = _DEV_PROCESSES[process_name]
-        proc = info.get("proc")
-        if proc:
+    name = process_name.replace(' ', '_')
+    info = _DEV_PROCESSES.pop(name, None)
+    if info:
+        proc = info["proc"]
+        try:
+            parent = psutil.Process(proc.pid)
+            for child in parent.children(recursive=True):
+                child.terminate()
+            proc.terminate()
+            proc.wait(timeout=5)
+        except Exception:
             try:
-                proc.terminate()
-                proc.wait(timeout=5)
+                proc.kill()
             except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-        del _DEV_PROCESSES[process_name]
-        return {"status": "success", "message": f"Stopped {process_name}"}
-    return {"status": "success", "message": f"{process_name} already stopped"}
+                pass
+        return {"status": "success", "message": f"Stopped {name}"}
+    return {"status": "success", "message": f"{name} already stopped"}
+
 
 def _fallback_status() -> str:
-    global _DEV_PROCESSES
     lines = []
-    clusters = get_configured_clusters()
-    configured_names = {c['safe_name'] for c in clusters}
-
-    for name in configured_names:
-        if name in _DEV_PROCESSES:
-            info = _DEV_PROCESSES[name]
-            proc = info.get("proc")
-            if proc and proc.poll() is None:
-                uptime = int(time.time() - info.get("start_time", time.time()))
-                h, r = divmod(uptime, 3600)
-                m, s = divmod(r, 60)
-                lines.append(f"{name:<20} RUNNING   pid {proc.pid}, uptime {h}:{m:02d}:{s:02d}")
-            else:
-                lines.append(f"{name:<20} STOPPED")
+    for c in get_configured_clusters():
+        name = c['safe_name']
+        info = _DEV_PROCESSES.get(name)
+        if not info:
+            lines.append(f"{name:<20} STOPPED   Not started")
+            continue
+        proc = info["proc"]
+        code = proc.poll()
+        if code is None:
+            up = int(time.time() - info["start_time"])
+            h, r = divmod(up, 3600)
+            m, s = divmod(r, 60)
+            lines.append(f"{name:<20} RUNNING   pid {proc.pid}, uptime {h}:{m:02d}:{s:02d}")
         else:
-            lines.append(f"{name:<20} STOPPED")
+            lines.append(f"{name:<20} EXITED    exit status {code}")
     return "\n".join(lines)

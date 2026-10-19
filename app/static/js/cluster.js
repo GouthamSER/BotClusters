@@ -28,7 +28,7 @@ function initSocket() {
         reconnection: true,
         reconnectionDelay: 1000,
         reconnectionDelayMax: 5000,
-        reconnectionAttempts: MAX_RECONNECT_ATTEMPTS
+        reconnectionAttempts: Infinity
     });
 
     socket.on('connect', function () {
@@ -58,6 +58,7 @@ function initSocket() {
         if (data.system) {
             updateSystemBar(data.system);
         }
+        showHealthNotices(data);
 
         if (data.processes && Array.isArray(data.processes)) {
             allProcesses = data.processes;
@@ -66,6 +67,36 @@ function initSocket() {
             renderEmptyState();
         }
     });
+}
+
+let _noticeShown = {};
+function showHealthNotices(data) {
+    if (data.default_password && !_noticeShown.pw) {
+        _noticeShown.pw = true;
+        showToast('Security: you still use a default dashboard password. Change it in Settings (gear icon).', 'error');
+    }
+    if (data.supervisor_error && !_noticeShown.sup) {
+        _noticeShown.sup = true;
+        showToast('Supervisor is not answering yet: ' + data.supervisor_error + ' (retrying automatically)', 'error');
+    } else if (!data.supervisor_error) {
+        _noticeShown.sup = false;
+    }
+}
+
+function sparkline(values, color) {
+    if (!values || values.length < 2) return '<svg viewBox="0 0 100 26" preserveAspectRatio="none"></svg>';
+    const max = Math.max(...values), min = Math.min(...values);
+    const span = (max - min) || 1;
+    const pts = values.map((v, i) => {
+        const x = (i / (values.length - 1)) * 100;
+        const y = 24 - ((v - min) / span) * 22;
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(' ');
+    return `<svg viewBox="0 0 100 26" preserveAspectRatio="none"><polyline fill="none" stroke="${color}" stroke-width="1.6" vector-effect="non-scaling-stroke" points="${pts}"/></svg>`;
+}
+
+function isFailedState(p) {
+    return Boolean(p.auto_paused) || ['FATAL', 'BACKOFF', 'SETUP_FAILED'].includes(p.status);
 }
 
 function requestStatus() {
@@ -120,6 +151,7 @@ function closeAllModals() {
     closeCronModal();
     closeSettingsModal();
     closeBackupModal();
+    closeVersions();
 }
 
 // ── System Resource Bar ─────────────────────────────────────────
@@ -198,7 +230,7 @@ function renderBotDashboard() {
         const isPaused = Boolean(p.paused);
         const isAutoPaused = Boolean(p.auto_paused);
 
-        if (isAutoPaused || p.status === 'FATAL' || p.status === 'BACKOFF') fatal++;
+        if (isFailedState(p)) fatal++;
         else if (isPaused) paused++;
         else if (isRunning) online++;
         else offline++;
@@ -216,7 +248,7 @@ function renderBotDashboard() {
         const isRunning = p.status === 'RUNNING';
         const isPaused = Boolean(p.paused);
         const isAutoPaused = Boolean(p.auto_paused);
-        const isFatal = isAutoPaused || p.status === 'FATAL' || p.status === 'BACKOFF';
+        const isFatal = isFailedState(p);
 
         if (currentFilter === 'online' && (!isRunning || isPaused || isAutoPaused)) return false;
         if (currentFilter === 'offline' && (isRunning || isPaused || isFatal)) return false;
@@ -284,12 +316,16 @@ function createBotCard(p) {
     const isRunning = p.status === 'RUNNING';
     const isPaused = Boolean(p.paused);
     const isAutoPaused = Boolean(p.auto_paused);
-    const isFatal = isAutoPaused || p.status === 'FATAL' || p.status === 'BACKOFF';
+    const isFatal = isFailedState(p);
+    const isInstalling = p.status === 'INSTALLING';
 
     let statusClass, statusLabel;
-    if (isFatal) {
+    if (isInstalling) {
+        statusClass = 'status-paused';
+        statusLabel = 'Installing…';
+    } else if (isFatal) {
         statusClass = 'status-fatal';
-        statusLabel = isAutoPaused ? 'Auto-Paused' : (p.status || 'Failed');
+        statusLabel = p.status === 'SETUP_FAILED' ? 'Setup failed' : (isAutoPaused ? 'Crashing' : (p.status || 'Failed'));
     } else if (isPaused) {
         statusClass = 'status-paused';
         statusLabel = 'Paused';
@@ -305,18 +341,25 @@ function createBotCard(p) {
     card.className = 'bot-card' + (isFatal ? ' card-fatal' : '');
 
     const gitShort = p.git_info && p.git_info.commit_hash ?
-        `<span class="git-badge">#${p.git_info.commit_hash}</span> ${p.git_info.commit_message ? p.git_info.commit_message.slice(0, 32) + '...' : ''}` :
-        (p.branch ? `Branch: ${p.branch}` : 'Git Linked');
+        `<span class="git-badge">#${escapeHtml(p.git_info.commit_hash)}</span> ${p.git_info.commit_message ? escapeHtml(p.git_info.commit_message.slice(0, 32)) + '...' : ''}` :
+        (p.branch ? `Branch: ${escapeHtml(p.branch)}` : 'Git Linked');
 
-    const displayName = p.name.replace(/_/g, ' ');
-    const slotTag = p.slot ? `<span class="bot-slot-tag">${p.slot}</span>` : '';
+    const displayName = escapeHtml(p.name.replace(/_/g, ' '));
+    const slotTag = p.slot ? `<span class="bot-slot-tag">${escapeHtml(p.slot)}</span>` : '';
 
     let primaryControls = '';
-    if (isAutoPaused || isFatal) {
+    if (isInstalling) {
+        primaryControls = `
+            <div class="info-value mono" style="grid-column: span 3; text-align:center; opacity:.8;">
+                ⏳ ${escapeHtml(p.setup_message || 'Cloning and installing dependencies…')}
+            </div>
+        `;
+    } else if (isAutoPaused || isFatal) {
         primaryControls = `
             <button onclick="clearFailure('${p.name}')" class="action-btn btn-restart" style="grid-column: span 3;">
-                🔄 Reset Failure &amp; Start
+                🔄 ${p.status === 'SETUP_FAILED' ? 'Retry Setup' : 'Reset Failure &amp; Restart'}
             </button>
+            ${p.setup_message ? `<div class="info-value mono" style="grid-column: span 3; font-size:11px; opacity:.75; word-break:break-word;">${escapeHtml(p.setup_message.slice(-220))}</div>` : ''}
         `;
     } else {
         primaryControls = `
@@ -343,6 +386,12 @@ function createBotCard(p) {
                     <span class="status-dot"></span>
                     ${statusLabel}
                 </div>
+            </div>
+
+            <div class="spark-row" title="RAM over the last ~15 min">
+                <span>RAM</span>
+                ${sparkline(p.hist_mem, '#38bdf8')}
+                <span class="restart-badge ${p.restarts > 2 ? 'warn' : ''}" title="Times this bot restarted since dashboard started">↻ ${p.restarts || 0}</span>
             </div>
 
             <div class="bot-info-grid">
@@ -378,6 +427,8 @@ function createBotCard(p) {
                 <button class="sub-btn" onclick="viewLogs('${p.name}')" title="View Recent Logs">📄 Logs</button>
                 <button class="sub-btn" onclick="openBotConsole('${p.name}')" title="Terminal Console">💻 Console</button>
                 <button class="sub-btn" onclick="gitPullBot('${p.name}')" title="Pull latest Git commit & reload">⬇ Pull</button>
+                <button class="sub-btn" onclick="openVersions('${p.name}')" title="Commit history, rollback, webhook">⏪ Versions</button>
+                <button class="sub-btn" onclick="cloneBot('${p.slot || p.name}')" title="Copy this bot's settings into a new bot">⧉ Clone</button>
                 <button class="sub-btn" onclick="openEditBotModal('${p.slot || p.name}')" title="Edit Configuration">✏️ Edit</button>
                 <button class="sub-btn sub-btn-danger" onclick="deleteBot('${p.slot || p.name}', '${p.name}')" title="Delete Bot Cluster">🗑</button>
             </div>
@@ -390,13 +441,14 @@ function createBotCard(p) {
 // ── Bot Actions ─────────────────────────────────────────────────
 function toggleBot(processName, currentStatus) {
     const action = currentStatus === 'RUNNING' ? 'stop' : 'start';
+    const doneWord = action === 'start' ? 'started' : 'stopped';
     showToast(`${action === 'start' ? 'Starting' : 'Stopping'} ${processName}...`, 'info');
 
     fetch(`/supervisor/${action}/${encodeURIComponent(processName)}`, { method: 'POST' })
         .then(r => r.json())
         .then(data => {
             if (data.status === 'success') {
-                showToast(`Successfully ${action}ed ${processName}!`, 'success');
+                showToast(data.message || `Successfully ${doneWord} ${processName}!`, 'success');
                 setTimeout(requestStatus, 800);
             } else {
                 showToast(`Error: ${data.message}`, 'error');
@@ -515,6 +567,7 @@ function openAddBotModal() {
     document.getElementById('form-branch').value = 'main';
     document.getElementById('form-run-cmd').value = 'bot.py';
     document.getElementById('form-py-ver').value = '';
+    document.getElementById('form-cron').value = '';
     document.getElementById('form-auto-start').checked = true;
 
     const envContainer = document.getElementById('env-rows-container');
@@ -548,6 +601,7 @@ function openEditBotModal(slot) {
             document.getElementById('form-branch').value = b.branch || 'main';
             document.getElementById('form-run-cmd').value = b.run_command || 'bot.py';
             document.getElementById('form-py-ver').value = b.python_version || '';
+            document.getElementById('form-cron').value = b.cron || '';
 
             const envContainer = document.getElementById('env-rows-container');
             envContainer.innerHTML = '';
@@ -571,6 +625,8 @@ function closeBotModal() {
     if (slotInput) slotInput.disabled = false;
 }
 
+const SENSITIVE_KEY = /(token|secret|pass|key|hash|session|auth|dsn|uri|url.*(mongo|redis|postgres))/i;
+
 function addEnvRow(key = '', val = '') {
     const container = document.getElementById('env-rows-container');
     if (!container) return;
@@ -579,9 +635,20 @@ function addEnvRow(key = '', val = '') {
     row.className = 'env-row';
     row.innerHTML = `
         <input type="text" class="env-key" placeholder="KEY (e.g. BOT_TOKEN)" value="${escapeHtml(key)}">
-        <input type="text" class="env-val" placeholder="VALUE" value="${escapeHtml(val)}">
+        <input type="${SENSITIVE_KEY.test(key) ? 'password' : 'text'}" class="env-val" placeholder="VALUE" value="${escapeHtml(val)}" autocomplete="off">
+        <button type="button" class="env-eye" title="Show / hide value">👁</button>
         <button type="button" class="btn-del-env" onclick="this.parentElement.remove()" title="Remove variable">&times;</button>
     `;
+    const keyEl = row.querySelector('.env-key');
+    const valEl = row.querySelector('.env-val');
+    // secrets (tokens, passwords, API keys) are hidden by default; auto-detected from the key name
+    keyEl.addEventListener('input', () => {
+        if (SENSITIVE_KEY.test(keyEl.value) && valEl.type === 'text' && !valEl.dataset.touched) valEl.type = 'password';
+    });
+    row.querySelector('.env-eye').addEventListener('click', () => {
+        valEl.dataset.touched = '1';
+        valEl.type = valEl.type === 'password' ? 'text' : 'password';
+    });
     container.appendChild(row);
 }
 
@@ -595,6 +662,7 @@ function handleBotFormSubmit(e) {
     const branch = document.getElementById('form-branch').value.trim() || 'main';
     const runCmd = document.getElementById('form-run-cmd').value.trim() || 'bot.py';
     const pyVer = document.getElementById('form-py-ver').value || null;
+    const cron = document.getElementById('form-cron').value.trim() || null;
     const autoStart = document.getElementById('form-auto-start').checked;
 
     const env = {};
@@ -611,6 +679,7 @@ function handleBotFormSubmit(e) {
         branch: branch,
         run_command: runCmd,
         python_version: pyVer,
+        cron: cron,
         env: env,
         auto_start: autoStart
     };
@@ -636,6 +705,94 @@ function handleBotFormSubmit(e) {
             }
         })
         .catch(err => showToast(`Error saving bot: ${err.message}`, 'error'));
+}
+
+function cloneBot(slot) {
+    fetch(`/api/bots/${encodeURIComponent(slot)}`)
+        .then(r => r.json())
+        .then(data => {
+            if (data.status !== 'success') { showToast(`Cannot clone: ${data.message}`, 'error'); return; }
+            const b = data.bot;
+            openAddBotModal();
+            document.getElementById('bot-modal-title').textContent = `Clone of ${b.bot_name}`;
+            document.getElementById('form-bot-name').value = `${b.bot_name}_copy`;
+            document.getElementById('form-git-url').value = b.git_url || '';
+            document.getElementById('form-branch').value = b.branch || 'main';
+            document.getElementById('form-run-cmd').value = b.run_command || 'bot.py';
+            document.getElementById('form-py-ver').value = b.python_version || '';
+            document.getElementById('form-cron').value = b.cron || '';
+            const envContainer = document.getElementById('env-rows-container');
+            envContainer.innerHTML = '';
+            const keys = Object.keys(b.env || {});
+            (keys.length ? keys : ['']).forEach(k => addEnvRow(k, (b.env || {})[k] || ''));
+            showToast('Change the name and secrets (e.g. a different BOT_TOKEN), then Save.', 'info');
+        })
+        .catch(err => showToast(`Error: ${err.message}`, 'error'));
+}
+
+// ── Versions (history / rollback / webhook) ─────────────────────
+let currentVersionsBot = null;
+
+function openVersions(name) {
+    currentVersionsBot = name;
+    document.getElementById('versions-title').textContent = `Versions: ${name}`;
+    const list = document.getElementById('versions-list');
+    list.textContent = 'Loading…';
+    document.getElementById('versions-modal').style.display = 'block';
+
+    fetch(`/api/bots/webhook/${encodeURIComponent(name)}`)
+        .then(r => r.json())
+        .then(d => { document.getElementById('versions-webhook').value = d.path ? location.origin + d.path : ''; })
+        .catch(() => {});
+
+    fetch(`/api/bots/commits/${encodeURIComponent(name)}`)
+        .then(r => r.json())
+        .then(data => {
+            if (data.status !== 'success') { list.textContent = data.message || 'Failed to load'; return; }
+            list.innerHTML = '';
+            data.commits.forEach(c => {
+                const row = document.createElement('div');
+                row.className = 'version-row' + (c.current ? ' current' : '');
+                row.innerHTML = `
+                    <div class="v-main">
+                        <div class="v-subject"><span class="git-badge">#${escapeHtml(c.short)}</span> ${escapeHtml(c.subject)}</div>
+                        <div class="v-sub">${escapeHtml(c.author)} · ${escapeHtml(c.when)}${c.current ? ' · running now' : ''}</div>
+                    </div>
+                    ${c.current ? '' : `<button class="btn btn-sm btn-secondary">⏪ Roll back</button>`}`;
+                const btn = row.querySelector('button');
+                if (btn) btn.onclick = () => rollbackTo(c.hash, c.short);
+                list.appendChild(row);
+            });
+            if (!data.commits.length) list.textContent = 'No commits found.';
+        })
+        .catch(err => { list.textContent = `Error: ${err.message}`; });
+}
+
+function closeVersions() {
+    const m = document.getElementById('versions-modal');
+    if (m) m.style.display = 'none';
+}
+
+function copyWebhook() {
+    const el = document.getElementById('versions-webhook');
+    el.select();
+    (navigator.clipboard ? navigator.clipboard.writeText(el.value) : Promise.resolve(document.execCommand('copy')))
+        .then(() => showToast('Webhook URL copied. Add it in GitHub → Settings → Webhooks (push event).', 'success'));
+}
+
+function rollbackTo(hash, short) {
+    if (!confirm(`Roll ${currentVersionsBot} back to #${short}?\nThe bot restarts on that version.`)) return;
+    fetch(`/api/bots/rollback/${encodeURIComponent(currentVersionsBot)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ commit: hash })
+    })
+        .then(r => r.json())
+        .then(d => {
+            showToast(d.message, d.status === 'success' ? 'success' : 'error');
+            if (d.status === 'success') { closeVersions(); setTimeout(requestStatus, 1000); }
+        })
+        .catch(err => showToast(`Error: ${err.message}`, 'error'));
 }
 
 function deleteBot(slot, botName) {
@@ -787,6 +944,7 @@ function openSettingsModal() {
                 document.getElementById('set-password').value = '';
                 document.getElementById('set-app-url').value = s.app_url || '';
                 document.getElementById('set-ping-interval').value = s.ping_interval || 240;
+                document.getElementById('set-auto-pull').value = s.auto_pull_minutes || 0;
                 document.getElementById('set-telegram-chat').value = s.telegram_chat_id || '';
                 document.getElementById('set-telegram-token').value = s.telegram_token_configured ? '••••••••••••' : '';
                 document.getElementById('settings-modal').style.display = 'block';
@@ -809,6 +967,7 @@ function handleSettingsSubmit(e) {
         admin_password: document.getElementById('set-password').value.trim() || undefined,
         app_url: document.getElementById('set-app-url').value.trim(),
         ping_interval: parseInt(document.getElementById('set-ping-interval').value, 10) || 240,
+        auto_pull_minutes: parseInt(document.getElementById('set-auto-pull').value, 10) || 0,
         telegram_chat_id: document.getElementById('set-telegram-chat').value.trim()
     };
 
@@ -876,7 +1035,7 @@ function handleImportFile(e) {
                 .then(r => r.json())
                 .then(data => {
                     if (data.status === 'success') {
-                        showToast(`Successfully imported ${data.imported_count} bot cluster(s)!`, 'success');
+                        showToast(data.message || `Imported ${data.imported_count} bot cluster(s)`, data.imported_count ? 'success' : 'error');
                         closeBackupModal();
                         setTimeout(requestStatus, 1200);
                     } else {

@@ -13,3 +13,4 @@ python-dotenv
 python-socketio==5.4.0
 python-engineio==4.3.0
 Werkzeug>=2.0.0,<2.3.0
+croniter

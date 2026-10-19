@@ -1,354 +1,171 @@
+"""
+BotClusters boot worker.
+
+Runs once at container start (started by cluster.py):
+  1. waits until supervisord is ready
+  2. removes supervisor programs of bots that are no longer configured
+  3. clones / updates every configured bot, builds its venv, writes its supervisor conf
+  4. tells supervisor to load the confs (bots then start automatically)
+
+It uses the SAME config reader and setup code as the web dashboard, so names, folders,
+log paths and python versions always match what the dashboard shows. One broken bot
+never blocks the others.
+"""
 import os
+os.environ["BOTCLUSTERS_NO_WEB"] = "1"      # import app.utils without booting the web app
+
 import sys
-import re
-import json
-import glob
 import time
 import shutil
-import signal
-import random
-import asyncio
 import logging
 import argparse
 import subprocess
-from pathlib import Path
-from phrase import WORD_LIST
-from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor
 from logging.handlers import RotatingFileHandler
 
-LOG_FILE = 'bot_manager.log'
-LOG_SIZE = 10 * 1024 * 1024  # 10 MB
-LOG_BACKUP_COUNT = 5
-
-def get_base_app_dir():
-    custom_dir = os.environ.get("APP_DIR")
-    if custom_dir:
-        return Path(custom_dir)
-    # Default to /app in container/Linux; if /app cannot be used, fallback to local ./bots
-    p = Path("/app")
-    try:
-        p.mkdir(parents=True, exist_ok=True)
-        return p
-    except (PermissionError, OSError):
-        local_p = Path.cwd() / "bots"
-        local_p.mkdir(parents=True, exist_ok=True)
-        return local_p
-
-APP_BASE_DIR = get_base_app_dir()
-SUPERVISORD_CONF_DIR = Path(os.environ.get("SUPERVISORD_CONF_DIR", "/etc/supervisor/conf.d"))
-
-file_handler = RotatingFileHandler(LOG_FILE, maxBytes=LOG_SIZE, backupCount=LOG_BACKUP_COUNT, encoding='utf-8')
-console_handler = logging.StreamHandler()
-formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-file_handler.setFormatter(formatter)
-console_handler.setFormatter(formatter)
-file_handler.setLevel(logging.DEBUG)
-console_handler.setLevel(logging.DEBUG)
-logging.getLogger().handlers.clear()
-logging.getLogger().addHandler(file_handler)
-logging.getLogger().addHandler(console_handler)
-logging.getLogger().setLevel(logging.DEBUG)
-
-def generate_prefix():
-    word1 = random.choice(WORD_LIST)
-    word2 = random.choice(WORD_LIST)
-    prefix = f"{word1} {word2}"
-    logging.info(f'Generated prefix: {prefix}')
-    return prefix
-
-def get_pyenv_python(version):
-    major_minor = '.'.join(version.split('.')[:2])
-    shim = shutil.which(f"python{major_minor}")
-    if shim:
-        return shim
-    logging.warning(f"pyenv shim python{major_minor} not found in PATH. Falling back to default python.")
-    return shutil.which(sys.executable) or shutil.which("python3") or "python3"
-
-def get_venv_bin(venv_dir: Path, bin_name: str) -> Path:
-    """Find binary in virtualenv supporting both Linux (bin) and Windows (Scripts)."""
-    is_windows = os.name == 'nt' or sys.platform == 'win32'
-    dirs = [venv_dir / ('Scripts' if is_windows else 'bin'), venv_dir / 'bin', venv_dir / 'Scripts']
-    exts = ['.exe', ''] if is_windows else ['', '.exe']
-    for d in dirs:
-        for ext in exts:
-            target = d / f"{bin_name}{ext}"
-            if target.exists():
-                return target
-    primary_dir = venv_dir / ('Scripts' if is_windows else 'bin')
-    return primary_dir / (f"{bin_name}.exe" if is_windows else bin_name)
-
-def run_with_pyenv(version, command_args, **kwargs):
-    env = os.environ.copy()
-    env["PYENV_VERSION"] = version
-    kwargs["env"] = env
-    return subprocess.run(command_args, **kwargs)
-    
-def validate_config(clusters):
-    required_keys = ['bot_number', 'git_url', 'branch', 'run_command']
-    seen_bot_suffixes = set()
-    bot_suffix_pattern = re.compile(r'[a-zA-Z0-9_\-]+$')
-
-    for cluster in clusters:
-        if not all(key in cluster for key in required_keys):
-            logging.error(f"Missing required fields in: {cluster.get('name', 'Unknown')}")
-            return False
-
-        if not cluster['git_url'].startswith(('http://', 'https://', 'git@')):
-            logging.error(f"Invalid git_url for {cluster['name']}: {cluster['git_url']}")
-            return False
-
-        match = bot_suffix_pattern.search(cluster['bot_number'])
-        if not match:
-            logging.error(f"Invalid bot_number format for {cluster['name']}: {cluster['bot_number']}")
-            return False
-
-        bot_suffix = match.group()
-        if bot_suffix in seen_bot_suffixes:
-            logging.error(f"Duplicate bot identifier found: {bot_suffix} in {cluster['bot_number']}")
-            return False
-
-        seen_bot_suffixes.add(bot_suffix)
-
-    logging.info("Configuration validation successful.")
-    return True
-    
-def load_config(file_path):
-    logging.info(f'Loading configuration from {file_path}')
-    
-    try:
-        with open(file_path, "r", encoding="utf-8") as jsonfile:
-            config = json.load(jsonfile)
-    except (json.JSONDecodeError, FileNotFoundError) as e:
-        logging.error(f"Error loading JSON file: {e}")
-        return []
-
-    clusters = []
-    for cluster in config.get('clusters', []):
-        details_str = os.getenv(cluster['name'], '{}')
-        
-        try:
-            details = json.loads(details_str)
-            if not isinstance(details, list) or len(details) < 4:
-                continue
-
-            prefix = generate_prefix()
-            cluster_name = f"{prefix} {cluster['name']}"
-            cron_value = details[6] if len(details) > 6 else cluster.get("cron", None)
-
-            clusters.append({
-                "name": cluster_name,
-                "bot_number": f"{prefix} {details[0]}",
-                "git_url": details[1],
-                "branch": details[2],
-                "run_command": details[3],
-                "env": details[4] if len(details) > 4 and isinstance(details[4], dict) else {},
-                "python_version": details[5] if len(details) > 5 else None,
-                "cron": cron_value,
-            })
-
-        except json.JSONDecodeError:
-            logging.error(f"Error decoding JSON for {cluster['name']}, skipping.")
-            continue
-
-    if not validate_config(clusters):
-        raise ValueError("Invalid configuration file.")
-
-    return clusters
+from dotenv import load_dotenv
 
 load_dotenv('cluster.env', override=True)
-clusters = load_config("config.json")
 
-def write_supervisord_config(cluster, command):
-    try:
-        SUPERVISORD_CONF_DIR.mkdir(parents=True, exist_ok=True)
-    except Exception as e:
-        logging.warning(f"Could not create supervisord conf dir {SUPERVISORD_CONF_DIR}: {e}")
+from app.utils.cluster_config import (       # noqa: E402
+    SUPERVISORD_CONF_DIR, APP_BASE_DIR, get_configured_clusters,
+    send_telegram_alert, set_worker_state, mask_url
+)
+from app.utils.process_manager import (      # noqa: E402
+    prepare_bot_environment, write_supervisor_config_file, _supervisor_env_string
+)
 
-    safe_name = cluster['bot_number'].replace(' ', '_')
-    config_path = SUPERVISORD_CONF_DIR / f"{safe_name}.conf"
-    logging.info(f"Writing supervisord configuration for {cluster['bot_number']} at {config_path}")
-    env_vars = ','.join([f'{key}="{value}"' for key, value in cluster['env'].items()]) if cluster['env'] else ""
-    bot_run_dir = APP_BASE_DIR / safe_name
+LOG_FILE = 'bot_manager.log'
+file_handler = RotatingFileHandler(LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=3, encoding='utf-8')
+console_handler = logging.StreamHandler()
+fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+for h in (file_handler, console_handler):
+    h.setFormatter(fmt)
+root = logging.getLogger()
+root.handlers.clear()
+root.addHandler(file_handler)
+root.addHandler(console_handler)
+root.setLevel(logging.INFO)
 
-    config_content = f"""
-[program:{safe_name}]
-command={command}
-directory={bot_run_dir.as_posix()}
-autostart=true
-autorestart=true
-startretries=12
-stderr_logfile=/var/log/supervisor/{safe_name}_err.log
-stdout_logfile=/var/log/supervisor/{safe_name}_out.log
-{f"environment={env_vars}" if env_vars else ""}
-    """
-    try:
-        config_path.write_text(config_content.strip(), encoding="utf-8")
-        logging.info(f"Supervisord configuration for {cluster['bot_number']} written successfully.")
-    except Exception as e:
-        logging.error(f"Failed to write supervisord config: {e}")
+MAX_PARALLEL_SETUPS = 3
+HAS_SUPERVISORCTL = shutil.which("supervisorctl") is not None
 
-def _prepare_bot_dir(cluster):
-    bot_dir = APP_BASE_DIR / cluster['bot_number'].replace(" ", "_")
-    venv_dir = bot_dir / 'venv'
-    requirements_file = bot_dir / 'requirements.txt'
-    branch = cluster.get('branch', 'main')
-    
-    if bot_dir.exists():
-        logging.info(f'Removing existing directory: {bot_dir}')
-        shutil.rmtree(bot_dir, ignore_errors=True)
-    
-    logging.info(f'Cloning {cluster["bot_number"]} from {cluster["git_url"]} (branch: {branch})')
-    subprocess.run(['git', 'clone', '-b', branch, '--single-branch', cluster['git_url'], str(bot_dir)], check=True)
-    
-    version = cluster.get("python_version")
-    if version:
-        python_executable = get_pyenv_python(version)
-    else:
-        python_executable = sys.executable or shutil.which("python3") or "python3"
-        
-    if requirements_file.exists():
-        logging.info(f'Creating virtual environment for {cluster["bot_number"]} using {python_executable}')
-        if version:
-            run_with_pyenv(version, [python_executable, '-m', 'venv', str(venv_dir)], check=True)
-            pip_bin = str(get_venv_bin(venv_dir, 'pip'))
-            pip_command = [pip_bin, 'install', '--no-cache-dir', '-r', str(requirements_file)]
-            run_with_pyenv(version, pip_command, check=True)
-        else:
-            subprocess.run([python_executable, '-m', 'venv', str(venv_dir)], check=True)
-            pip_bin = str(get_venv_bin(venv_dir, 'pip'))
-            pip_command = [pip_bin, 'install', '--no-cache-dir', '-r', str(requirements_file)]
-            subprocess.run(pip_command, check=True)
-                
-async def start_bot(cluster):
-    logging.info(f'Starting bot: {cluster["bot_number"]}')
-    bot_dir = APP_BASE_DIR / cluster['bot_number'].replace(" ", "_")
-    venv_dir = bot_dir / 'venv'
-    bot_file = bot_dir / cluster['run_command']
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, _prepare_bot_dir, cluster)
 
-    python_executable = get_venv_bin(venv_dir, 'python')
+def supervisorctl(*args, timeout=60):
+    return subprocess.run(["supervisorctl", *args], capture_output=True, text=True, timeout=timeout)
 
-    if bot_file.suffix == ".sh":
-        command = f"bash {bot_file.as_posix()}"
-    elif bot_file.suffix == ".py":
-        command = f"{python_executable.as_posix()} {bot_file.as_posix()}"
-    else:
-        command = f"{python_executable.as_posix()} -m {bot_file.stem}"
 
-    write_supervisord_config(cluster, command)
-
-async def async_supervisorctl(command):
-    if not shutil.which("supervisorctl"):
-        logging.warning(f"supervisorctl not found; skipping '{command}'")
-        return
-    proc = await asyncio.create_subprocess_shell(
-        command,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
-    )
-    stdout, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        logging.error(f"Supervisorctl command failed: {stderr.decode()}")
-    else:
-        logging.info(f"Supervisorctl command succeeded: {stdout.decode()}")
-
-async def reload_supervisord():
-    logging.info("Reloading supervisord...")
-    await async_supervisorctl("supervisorctl reread")
-    await async_supervisorctl("supervisorctl update")
-    logging.info("Supervisord updated successfully.")
-
-async def get_process_status(bot_conf_name):
-    if not shutil.which("supervisorctl"):
-        return None
-    proc = await asyncio.create_subprocess_shell(
-        f"supervisorctl status {bot_conf_name}",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
-    )
-    stdout, stderr = await proc.communicate()
-    if proc.returncode == 0:
-        status_line = stdout.decode().strip()
-        if status_line:
-            parts = status_line.split()
-            if len(parts) >= 2:
-                return parts[1]
-    return None
-
-async def cleanup_existing_bots():
-    if not SUPERVISORD_CONF_DIR.exists():
-        return
-    for conf_file in SUPERVISORD_CONF_DIR.glob("*.conf"):
-        bot_conf_name = conf_file.stem
-        await async_supervisorctl(f"supervisorctl stop {bot_conf_name}")
+def wait_for_supervisord(timeout=90):
+    """supervisord is started in parallel by cluster.py - `reread/update` fail if we beat it."""
+    if not HAS_SUPERVISORCTL:
+        logging.warning("supervisorctl not found - only writing configs")
+        return False
+    deadline = time.time() + timeout
+    while time.time() < deadline:
         try:
-            conf_file.unlink()
+            res = supervisorctl("status", timeout=10)
+            # exit 0 = all running, 3 = some not running; both mean "daemon answered"
+            if res.returncode in (0, 3):
+                return True
         except Exception:
             pass
-        logging.info(f"Cleaned up supervisord config and stopped bot: {bot_conf_name}")
-    await reload_supervisord()
-
-async def wait_for_process_stop(bot_conf_name, timeout=30, interval=2):
-    start_time = time.time()
-    while time.time() - start_time < timeout:
-        status = await get_process_status(bot_conf_name)
-        if status != 'RUNNING':
-            return True
-        await asyncio.sleep(interval)
+        time.sleep(2)
+    logging.error("supervisord did not become ready in time")
     return False
 
-async def stop_bot(bot_number):
-    logging.info(f"Stopping bot: {bot_number}")
-    bot_conf_name = bot_number.replace(" ", "_")
-    
-    await async_supervisorctl(f"supervisorctl stop {bot_conf_name}")
-    if not await wait_for_process_stop(bot_conf_name):
-        logging.warning(f"Process {bot_conf_name} did not stop within timeout.")
-    
-    conf_path = SUPERVISORD_CONF_DIR / f"{bot_conf_name}.conf"
-    if conf_path.exists():
+
+def remove_stale_programs(configured_names):
+    """Delete supervisor programs for bots that are no longer configured."""
+    if not SUPERVISORD_CONF_DIR.exists():
+        return
+    for conf in SUPERVISORD_CONF_DIR.glob("*.conf"):
+        if conf.stem in configured_names:
+            continue
+        logging.info(f"Removing stale supervisor program: {conf.stem}")
+        if HAS_SUPERVISORCTL:
+            try:
+                supervisorctl("stop", conf.stem, timeout=30)
+            except Exception:
+                pass
         try:
-            conf_path.unlink()
-            logging.info(f"Removed supervisord configuration for {bot_number}.")
+            conf.unlink()
+        except Exception:
+            pass
+
+
+def refresh_repo(bot_dir):
+    """Existing clone (persistent disk): fast-forward to latest code. Never fatal."""
+    if (bot_dir / ".git").exists():
+        try:
+            subprocess.run(["git", "pull", "--ff-only", "-q"], cwd=bot_dir, capture_output=True, timeout=120)
         except Exception as e:
-            logging.error(f"Error removing conf {conf_path}: {e}")
+            logging.warning(f"git pull skipped for {bot_dir.name}: {e}")
 
-async def sort_bot_run_commands(cluster_list):
-    tasks = [start_bot(cluster) for cluster in cluster_list]
-    if tasks:
-        await asyncio.gather(*tasks)
-        await reload_supervisord()
-    else:
-        logging.info("No clusters configured to start.")
 
-async def restart_all_bots():
-    logging.info('Stopping all bots...')
-    tasks = [stop_bot(cluster['bot_number']) for cluster in clusters]
-    if tasks:
-        await asyncio.gather(*tasks)
-        await reload_supervisord()
+def setup_one(bot):
+    name = bot["safe_name"]
+    try:
+        set_worker_state(name, "INSTALLING", "Cloning repository and installing dependencies…")
+        _supervisor_env_string(bot.get("env") or {})
+        refresh_repo(APP_BASE_DIR / name)
+        _, cmd = prepare_bot_environment(bot)
+        write_supervisor_config_file(bot, cmd, autostart=True)
+        set_worker_state(name, None)
+        logging.info(f"[{name}] ready: {cmd}")
+        return name, None
+    except Exception as e:
+        msg = mask_url(str(e))[-500:]
+        logging.error(f"[{name}] setup failed: {msg}")
+        set_worker_state(name, "SETUP_FAILED", msg)
+        send_telegram_alert(f"❌ <b>BotClusters</b>\nSetup of <code>{name}</code> failed at boot:\n<code>{msg[-300:]}</code>")
+        return name, msg
 
-async def main_async():
+
+def main():
     parser = argparse.ArgumentParser(description='Bot Manager')
-    parser.add_argument('--restart', action='store_true', help='Restart all bots')
+    parser.add_argument('--restart', action='store_true', help='Stop all configured bots')
     args = parser.parse_args()
-    await cleanup_existing_bots()
+
+    clusters = get_configured_clusters()
+    logging.info(f"Found {len(clusters)} configured bot(s): {[c['safe_name'] for c in clusters]}")
+
+    supervisor_ready = wait_for_supervisord()
 
     if args.restart:
-        logging.info('Restarting bot manager...')
-        await asyncio.gather(*(async_supervisorctl(f"supervisorctl stop {cluster['bot_number'].replace(' ', '_')}") for cluster in clusters))
-        await reload_supervisord()
-    else:
-        logging.info('Starting bot manager...')
-        await sort_bot_run_commands(clusters)
+        for c in clusters:
+            if supervisor_ready:
+                supervisorctl("stop", c["safe_name"])
+        return
 
-def shutdown_handler():
-    logging.info('Shutting down bot manager...')
+    remove_stale_programs({c["safe_name"] for c in clusters})
+    try:
+        os.remove("worker_state.json")          # drop stale INSTALLING/FAILED flags from last run
+    except OSError:
+        pass
+
+    if not clusters:
+        logging.info("No clusters configured. Add bots from the dashboard.")
+        if supervisor_ready:
+            supervisorctl("reread")
+            supervisorctl("update")
+        return
+
+    with ThreadPoolExecutor(max_workers=MAX_PARALLEL_SETUPS) as pool:
+        results = list(pool.map(setup_one, clusters))
+
+    failed = [n for n, err in results if err]
+    if supervisor_ready:
+        supervisorctl("reread")
+        supervisorctl("update", timeout=120)
+        logging.info("Supervisor updated.")
+    logging.info(f"Worker finished: {len(results) - len(failed)} ready, {len(failed)} failed {failed or ''}")
+
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main_async())
+        main()
     except (KeyboardInterrupt, SystemExit):
-        shutdown_handler()
+        logging.info("Worker interrupted")
+    except Exception:
+        logging.exception("Worker crashed")
+        sys.exit(1)

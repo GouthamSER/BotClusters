@@ -201,6 +201,7 @@
                         <label for="form-py-ver">Python Version</label>
                         <select id="form-py-ver">
                             <option value="">Default (System Python)</option>
+                            <option value="3.13">Python 3.13</option>
                             <option value="3.12">Python 3.12</option>
                             <option value="3.11">Python 3.11</option>
                             <option value="3.10">Python 3.10</option>
@@ -208,6 +209,12 @@
                             <option value="3.8">Python 3.8</option>
                         </select>
                     </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="form-cron">Auto-restart schedule <small>(optional, cron)</small></label>
+                    <input type="text" id="form-cron" placeholder="e.g. 0 */6 * * *  (every 6 hours)">
+                    <small class="form-hint">Restarts this bot only while it is running. Format: minute hour day month weekday.</small>
                 </div>
 
                 <!-- Environment Variables Builder -->
@@ -286,6 +293,30 @@
         </div>
     </div>
 
+    <!-- ── Versions Modal (history, rollback, webhook) ── -->
+    <div id="versions-modal" class="modal">
+        <div class="modal-content modal-lg">
+            <div class="modal-header">
+                <div>
+                    <h2 id="versions-title">Versions</h2>
+                    <p class="modal-desc">Recent commits. Roll back if a new push broke your bot.</p>
+                </div>
+                <div class="modal-header-actions">
+                    <button class="btn btn-sm btn-secondary" onclick="gitPullBot(currentVersionsBot); setTimeout(() => openVersions(currentVersionsBot), 2500)">⬇ Pull latest</button>
+                    <span class="modal-close" onclick="closeVersions()">&times;</span>
+                </div>
+            </div>
+            <div class="form-group" style="margin: 0 0 12px;">
+                <label>Auto-deploy webhook <small>(GitHub → Settings → Webhooks, content type any, event: push)</small></label>
+                <div style="display:flex; gap:8px;">
+                    <input type="text" id="versions-webhook" readonly style="flex:1;">
+                    <button class="btn btn-sm btn-secondary" onclick="copyWebhook()">Copy</button>
+                </div>
+            </div>
+            <div id="versions-list" class="versions-list">Loading…</div>
+        </div>
+    </div>
+
     <!-- ── Cron Config Modal ── -->
     <div id="cron-modal" class="modal">
         <div class="modal-content modal-sm">
@@ -344,6 +375,12 @@
                 </div>
 
                 <h3 class="settings-section-title">📢 Telegram Crash &amp; Auto-Pause Alerts</h3>
+                <div class="form-group">
+                    <label for="set-auto-pull">Auto-pull new commits <small>(minutes, 0 = off)</small></label>
+                    <input type="number" id="set-auto-pull" value="0" min="0" max="10080">
+                    <small class="form-hint">Checks each running bot's repo and restarts it when new code is pushed. Min 5.</small>
+                </div>
+
                 <div class="form-group">
                     <label for="set-telegram-token">Telegram Bot Token</label>
                     <input type="text" id="set-telegram-token" placeholder="123456789:ABCdefGhIJKlmNoPQRstuvwxYZ">
