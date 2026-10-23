@@ -2,6 +2,7 @@ FROM python:3.10-slim
 
 ENV PYTHONUNBUFFERED=1 \
     DEBIAN_FRONTEND=noninteractive \
+    PIP_BREAK_SYSTEM_PACKAGES=1 \
     UV_PYTHON_INSTALL_DIR=/opt/python \
     N_PREFIX=/usr/local/n
 
@@ -29,6 +30,7 @@ RUN uv python install 3.10 3.11 3.12 3.13 \
     && ln -sf "$(uv python find 3.11)" /usr/local/bin/python3.11 \
     && ln -sf "$(uv python find 3.12)" /usr/local/bin/python3.12 \
     && ln -sf "$(uv python find 3.13)" /usr/local/bin/python3.13 \
+    && find /opt/python -name "EXTERNALLY-MANAGED" -delete \
     && chmod -R 755 /opt/python
 
 # Install Node.js version manager 'n' and Node.js 20 (LTS) & 22 (Current LTS/Latest)
@@ -49,7 +51,7 @@ RUN sed -i 's/\r$//' /usr/local/bin/install.sh && chmod +x /usr/local/bin/instal
 RUN /usr/local/bin/install.sh
 
 COPY requirements.txt ./
-RUN pip3 install --no-cache-dir -r requirements.txt
+RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
 COPY . .
 
 EXPOSE 5000

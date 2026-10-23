@@ -50,7 +50,7 @@ if [ -n "$PIP_PACKAGES" ]; then
         fi
     fi
     echo "[INFO] Installing pip packages: $PIP_PACKAGES"
-    pip3 install --no-cache-dir $PIP_PACKAGES || echo "[WARN] pip install had warnings"
+    pip3 install --no-cache-dir --break-system-packages $PIP_PACKAGES 2>/dev/null || pip3 install --no-cache-dir $PIP_PACKAGES || echo "[WARN] pip install had warnings"
     echo "[INFO] PIP packages installed successfully"
 fi
 
