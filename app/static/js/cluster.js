@@ -346,6 +346,9 @@ function createBotCard(p) {
 
     const displayName = escapeHtml(p.name.replace(/_/g, ' '));
     const slotTag = p.slot ? `<span class="bot-slot-tag">${escapeHtml(p.slot)}</span>` : '';
+    const runtimeBadge = p.runtime === 'node'
+        ? `<span class="bot-slot-tag" style="background: rgba(34, 197, 94, 0.15); color: #4ade80; border-color: rgba(34, 197, 94, 0.3);">🟩 Node ${escapeHtml(p.runtime_version || p.node_version || '22')}</span>`
+        : `<span class="bot-slot-tag" style="background: rgba(56, 189, 248, 0.15); color: #38bdf8; border-color: rgba(56, 189, 248, 0.3);">🐍 Python ${escapeHtml(p.python_version || p.runtime_version || '3.10')}</span>`;
 
     let primaryControls = '';
     if (isInstalling) {
@@ -381,6 +384,7 @@ function createBotCard(p) {
                 <div class="bot-title-group">
                     <h2>${displayName}</h2>
                     ${slotTag}
+                    ${runtimeBadge}
                 </div>
                 <div class="bot-status-pill ${statusClass}">
                     <span class="status-dot"></span>
@@ -555,6 +559,52 @@ function executeBatchAction(action) {
 }
 
 // ── Add / Edit Bot Modal ────────────────────────────────────────
+function handleRuntimeChange(resetCmd = true) {
+    const runtimeEl = document.getElementById('form-runtime');
+    const runtime = runtimeEl ? runtimeEl.value : 'python';
+    const pyGroup = document.getElementById('group-python-ver');
+    const nodeGroup = document.getElementById('group-node-ver');
+    const cmdInput = document.getElementById('form-run-cmd');
+    const datalist = document.getElementById('cmd-presets');
+
+    if (runtime === 'node') {
+        if (pyGroup) pyGroup.style.display = 'none';
+        if (nodeGroup) nodeGroup.style.display = 'flex';
+        if (datalist) {
+            datalist.innerHTML = `
+                <option value="index.js">
+                <option value="bot.js">
+                <option value="npm start">
+                <option value="npm run dev">
+                <option value="start.sh">
+            `;
+        }
+        if (cmdInput) {
+            cmdInput.placeholder = 'index.js';
+            if (resetCmd && (cmdInput.value === 'bot.py' || !cmdInput.value)) {
+                cmdInput.value = 'index.js';
+            }
+        }
+    } else {
+        if (pyGroup) pyGroup.style.display = 'flex';
+        if (nodeGroup) nodeGroup.style.display = 'none';
+        if (datalist) {
+            datalist.innerHTML = `
+                <option value="bot.py">
+                <option value="main.py">
+                <option value="app.py">
+                <option value="start.sh">
+            `;
+        }
+        if (cmdInput) {
+            cmdInput.placeholder = 'bot.py';
+            if (resetCmd && (cmdInput.value === 'index.js' || !cmdInput.value)) {
+                cmdInput.value = 'bot.py';
+            }
+        }
+    }
+}
+
 function openAddBotModal() {
     document.getElementById('bot-modal-title').textContent = 'Add New Bot Cluster';
     document.getElementById('bot-modal-desc').textContent = 'Configure git repository, entry script, and environment variables.';
@@ -566,9 +616,13 @@ function openAddBotModal() {
     document.getElementById('form-git-url').value = '';
     document.getElementById('form-branch').value = 'main';
     document.getElementById('form-run-cmd').value = 'bot.py';
-    document.getElementById('form-py-ver').value = '';
     document.getElementById('form-cron').value = '';
     document.getElementById('form-auto-start').checked = true;
+
+    if (document.getElementById('form-runtime')) document.getElementById('form-runtime').value = 'python';
+    if (document.getElementById('form-py-ver')) document.getElementById('form-py-ver').value = '3.10';
+    if (document.getElementById('form-node-ver')) document.getElementById('form-node-ver').value = '22';
+    handleRuntimeChange(false);
 
     const envContainer = document.getElementById('env-rows-container');
     envContainer.innerHTML = '';
@@ -600,8 +654,16 @@ function openEditBotModal(slot) {
             document.getElementById('form-git-url').value = b.git_url || '';
             document.getElementById('form-branch').value = b.branch || 'main';
             document.getElementById('form-run-cmd').value = b.run_command || 'bot.py';
-            document.getElementById('form-py-ver').value = b.python_version || '';
             document.getElementById('form-cron').value = b.cron || '';
+
+            const isNode = b.runtime === 'node' || (b.python_version && String(b.python_version).toLowerCase().startsWith('node')) || Boolean(b.node_version);
+            if (document.getElementById('form-runtime')) document.getElementById('form-runtime').value = isNode ? 'node' : 'python';
+            if (isNode && document.getElementById('form-node-ver')) {
+                document.getElementById('form-node-ver').value = b.node_version || b.runtime_version || '22';
+            } else if (document.getElementById('form-py-ver')) {
+                document.getElementById('form-py-ver').value = b.python_version || b.runtime_version || '3.10';
+            }
+            handleRuntimeChange(false);
 
             const envContainer = document.getElementById('env-rows-container');
             envContainer.innerHTML = '';
@@ -661,7 +723,9 @@ function handleBotFormSubmit(e) {
     const gitUrl = document.getElementById('form-git-url').value.trim();
     const branch = document.getElementById('form-branch').value.trim() || 'main';
     const runCmd = document.getElementById('form-run-cmd').value.trim() || 'bot.py';
-    const pyVer = document.getElementById('form-py-ver').value || null;
+    const runtime = document.getElementById('form-runtime') ? document.getElementById('form-runtime').value : 'python';
+    const pyVer = document.getElementById('form-py-ver') ? document.getElementById('form-py-ver').value : '3.10';
+    const nodeVer = document.getElementById('form-node-ver') ? document.getElementById('form-node-ver').value : '22';
     const cron = document.getElementById('form-cron').value.trim() || null;
     const autoStart = document.getElementById('form-auto-start').checked;
 
@@ -678,7 +742,10 @@ function handleBotFormSubmit(e) {
         git_url: gitUrl,
         branch: branch,
         run_command: runCmd,
-        python_version: pyVer,
+        runtime: runtime,
+        runtime_version: runtime === 'node' ? nodeVer : pyVer,
+        python_version: runtime === 'python' ? pyVer : null,
+        node_version: runtime === 'node' ? nodeVer : null,
         cron: cron,
         env: env,
         auto_start: autoStart
@@ -719,8 +786,17 @@ function cloneBot(slot) {
             document.getElementById('form-git-url').value = b.git_url || '';
             document.getElementById('form-branch').value = b.branch || 'main';
             document.getElementById('form-run-cmd').value = b.run_command || 'bot.py';
-            document.getElementById('form-py-ver').value = b.python_version || '';
             document.getElementById('form-cron').value = b.cron || '';
+
+            const isNode = b.runtime === 'node' || (b.python_version && String(b.python_version).toLowerCase().startsWith('node')) || Boolean(b.node_version);
+            if (document.getElementById('form-runtime')) document.getElementById('form-runtime').value = isNode ? 'node' : 'python';
+            if (isNode && document.getElementById('form-node-ver')) {
+                document.getElementById('form-node-ver').value = b.node_version || b.runtime_version || '22';
+            } else if (document.getElementById('form-py-ver')) {
+                document.getElementById('form-py-ver').value = b.python_version || b.runtime_version || '3.10';
+            }
+            handleRuntimeChange(false);
+
             const envContainer = document.getElementById('env-rows-container');
             envContainer.innerHTML = '';
             const keys = Object.keys(b.env || {});

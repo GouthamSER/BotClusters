@@ -359,7 +359,11 @@ def _cfg_fields(cfg):
         "branch": cfg.get("branch", "main"),
         "run_command": cfg.get("run_command", ""),
         "git_info": cfg.get("git_info", {}),
+        "runtime": cfg.get("runtime", "python"),
+        "runtime_version": cfg.get("runtime_version", ""),
+        "runtime_display": cfg.get("runtime_display", ""),
         "python_version": cfg.get("python_version", ""),
+        "node_version": cfg.get("node_version", ""),
         "cron": cfg.get("cron") or "",
     }
 
@@ -830,10 +834,14 @@ def validate_bot_payload(data, existing_names=()):
     bot_name = (data.get('bot_name') or '').strip()
     git_url = (data.get('git_url') or '').strip()
     branch = (data.get('branch') or 'main').strip()
-    run_command = (data.get('run_command') or 'bot.py').strip()
+    run_command = (data.get('run_command') or '').strip()
     env_vars = data.get('env') or {}
-    python_version = (str(data.get('python_version') or '').strip()) or None
     cron = (str(data.get('cron') or '').strip()) or None
+
+    runtime = (data.get('runtime') or '').strip().lower()
+    runtime_version = (str(data.get('runtime_version') or '').strip()) or None
+    python_version = (str(data.get('python_version') or '').strip()) or None
+    node_version = (str(data.get('node_version') or '').strip()) or None
 
     err = validate_bot_name(bot_name, existing_names) or validate_git_url(git_url)
     if err:
@@ -848,8 +856,38 @@ def validate_bot_payload(data, existing_names=()):
         _supervisor_env_string(env_vars)
     except ValueError as e:
         return None, str(e)
-    if python_version and not re.match(r'^\d+\.\d+(\.\d+)?$', python_version):
-        return None, "Python version must look like 3.11"
+
+    # Determine runtime
+    if not runtime:
+        if node_version or (python_version and str(python_version).lower().startswith("node")):
+            runtime = "node"
+        elif any(run_command.startswith(x) for x in ("node ", "npm ", "npx ", "yarn ", "pnpm ")) or run_command.endswith((".js", ".mjs", ".cjs", ".ts")):
+            runtime = "node"
+        else:
+            runtime = "python"
+
+    if not run_command:
+        run_command = "index.js" if runtime == "node" else "bot.py"
+
+    if runtime == "node":
+        n_ver = node_version or runtime_version
+        if not n_ver and python_version and str(python_version).lower().startswith("node"):
+            n_ver = re.sub(r"^node[\s:\-_]*", "", python_version, flags=re.IGNORECASE).strip()
+        n_ver = n_ver or "22"
+        if n_ver not in ("20", "22", "latest") and not re.match(r"^\d+(\.\d+)?$", n_ver):
+            return None, "Node.js version must be 20, 22, or latest"
+        node_version = n_ver
+        python_version = None
+        r_version = node_version
+    else:
+        runtime = "python"
+        py_ver = python_version or runtime_version
+        if py_ver and not re.match(r'^\d+\.\d+(\.\d+)?$', py_ver):
+            return None, "Python version must look like 3.10, 3.11, 3.12, or 3.13"
+        python_version = py_ver
+        node_version = None
+        r_version = python_version or "3.10"
+
     if cron:
         if croniter is None:
             return None, "Cron needs the 'croniter' package (pip install croniter)"
@@ -860,7 +898,11 @@ def validate_bot_payload(data, existing_names=()):
         "bot_name": bot_name, "safe_name": bot_name.replace(" ", "_"),
         "git_url": git_url, "branch": branch, "run_command": run_command,
         "env": {str(k).strip(): str(v) for k, v in env_vars.items() if str(k).strip()},
-        "python_version": python_version, "cron": cron,
+        "runtime": runtime,
+        "runtime_version": r_version,
+        "python_version": python_version,
+        "node_version": node_version,
+        "cron": cron,
     }, None
 
 
@@ -919,7 +961,10 @@ def api_update_bot(slot):
             "branch": data.get('branch') or existing['branch'],
             "run_command": data.get('run_command') or existing['run_command'],
             "env": data.get('env', existing['env']),
+            "runtime": data.get('runtime', existing.get('runtime')),
+            "runtime_version": data.get('runtime_version', existing.get('runtime_version')),
             "python_version": data.get('python_version', existing.get('python_version')),
+            "node_version": data.get('node_version', existing.get('node_version')),
             "cron": data.get('cron', existing.get('cron')),
         }
         others = [c['bot_name'] for c in clusters if c['slot'].upper() != slot.upper()]
@@ -931,7 +976,10 @@ def api_update_bot(slot):
         old_name = existing['safe_name']
         renamed = new['safe_name'] != old_name
         repo_changed = (new['git_url'] != existing['git_url']) or (new['branch'] != existing['branch'])
-        py_changed = (new['python_version'] or '') != (existing.get('python_version') or '')
+        runtime_changed = (new.get('runtime') != existing.get('runtime')) or \
+                          (new.get('runtime_version') != existing.get('runtime_version')) or \
+                          ((new.get('python_version') or '') != (existing.get('python_version') or '')) or \
+                          ((new.get('node_version') or '') != (existing.get('node_version') or ''))
 
         was_running = get_process_state(old_name) == "RUNNING"
 
@@ -947,7 +995,7 @@ def api_update_bot(slot):
         save_cluster_to_env(existing['slot'], new)
 
         setup_bot_async(new, start=was_running,
-                        reclone=repo_changed or renamed, drop_venv=py_changed and not (repo_changed or renamed))
+                        reclone=repo_changed or renamed, drop_venv=runtime_changed and not (repo_changed or renamed))
         broadcast_status_update()
         return jsonify({
             "status": "success",

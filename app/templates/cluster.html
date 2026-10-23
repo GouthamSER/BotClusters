@@ -186,6 +186,33 @@
 
                 <div class="form-row form-row-2">
                     <div class="form-group">
+                        <label for="form-runtime">Runtime Platform</label>
+                        <select id="form-runtime" onchange="handleRuntimeChange()">
+                            <option value="python">🐍 Python</option>
+                            <option value="node">🟩 Node.js</option>
+                        </select>
+                    </div>
+                    <div class="form-group" id="group-python-ver">
+                        <label for="form-py-ver">Python Version</label>
+                        <select id="form-py-ver">
+                            <option value="3.13">Python 3.13 (Latest)</option>
+                            <option value="3.12">Python 3.12</option>
+                            <option value="3.11">Python 3.11</option>
+                            <option value="3.10" selected>Python 3.10 (Default)</option>
+                        </select>
+                    </div>
+                    <div class="form-group" id="group-node-ver" style="display: none;">
+                        <label for="form-node-ver">Node.js Version</label>
+                        <select id="form-node-ver">
+                            <option value="22" selected>Node.js 22 (Latest / Active LTS)</option>
+                            <option value="20">Node.js 20 (Maintenance LTS)</option>
+                            <option value="latest">Node.js Latest</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="form-row form-row-2">
+                    <div class="form-group">
                         <label for="form-run-cmd">Run Command / Entrypoint <span class="req">*</span></label>
                         <div class="input-with-datalist">
                             <input type="text" id="form-run-cmd" list="cmd-presets" placeholder="bot.py" required value="bot.py">
@@ -198,23 +225,9 @@
                         </div>
                     </div>
                     <div class="form-group">
-                        <label for="form-py-ver">Python Version</label>
-                        <select id="form-py-ver">
-                            <option value="">Default (System Python)</option>
-                            <option value="3.13">Python 3.13</option>
-                            <option value="3.12">Python 3.12</option>
-                            <option value="3.11">Python 3.11</option>
-                            <option value="3.10">Python 3.10</option>
-                            <option value="3.9">Python 3.9</option>
-                            <option value="3.8">Python 3.8</option>
-                        </select>
+                        <label for="form-cron">Auto-restart schedule <small>(optional, cron)</small></label>
+                        <input type="text" id="form-cron" placeholder="e.g. 0 */6 * * *  (every 6 hours)">
                     </div>
-                </div>
-
-                <div class="form-group">
-                    <label for="form-cron">Auto-restart schedule <small>(optional, cron)</small></label>
-                    <input type="text" id="form-cron" placeholder="e.g. 0 */6 * * *  (every 6 hours)">
-                    <small class="form-hint">Restarts this bot only while it is running. Format: minute hour day month weekday.</small>
                 </div>
 
                 <!-- Environment Variables Builder -->

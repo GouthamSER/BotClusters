@@ -1,4 +1,5 @@
 import os
+import sys
 import re
 import json
 import shutil
@@ -143,6 +144,48 @@ def parse_cluster_env() -> dict:
                 env_data[key.upper() if SLOT_RE.match(key) else key] = val
     return env_data
 
+def parse_runtime(raw_version: Optional[str], bot_dir: Optional[Path] = None, run_command: Optional[str] = None):
+    """
+    Parse runtime details from raw_version string, repository contents, or run command.
+    Returns: (runtime, version, display_label)
+    e.g. ('python', '3.12', 'Python 3.12') or ('node', '22', 'Node.js 22')
+    """
+    raw = str(raw_version or "").strip()
+    if raw.lower().startswith("node"):
+        v = re.sub(r"^node[\s:\-_]*", "", raw, flags=re.IGNORECASE).strip() or "22"
+        return "node", v, f"Node.js {v}"
+
+    if raw and (raw.startswith("3.") or raw.lower().startswith("py")):
+        v = re.sub(r"^python[\s:\-_]*", "", raw, flags=re.IGNORECASE).strip()
+        v = v if v else "3.10"
+        return "python", v, f"Python {v}"
+
+    if raw and re.match(r"^\d+(\.\d+)?$", raw):
+        try:
+            num = float(raw)
+            if num >= 14:
+                return "node", str(int(num)), f"Node.js {int(num)}"
+            elif num < 4:
+                return "python", raw, f"Python {raw}"
+        except Exception:
+            pass
+
+    # Auto-detect from run_command
+    if run_command:
+        first_token = run_command.strip().split()[0].lower() if run_command.strip() else ""
+        if first_token in ("node", "npm", "npx", "yarn", "pnpm") or first_token.endswith((".js", ".mjs", ".cjs", ".ts")):
+            return "node", "22", "Node.js 22"
+
+    # Auto-detect from files in repo if present
+    if bot_dir and bot_dir.exists():
+        if (bot_dir / "package.json").exists() and not (bot_dir / "requirements.txt").exists():
+            return "node", "22", "Node.js 22"
+
+    default_py = sys.version.split()[0] if sys.version else "3.10"
+    short_py = '.'.join(default_py.split('.')[:2])
+    return "python", short_py, f"Python {short_py}"
+
+
 def get_configured_clusters() -> list:
     """Return all configured bot clusters with structured metadata."""
     load_dotenv(ENV_FILE, override=True)
@@ -164,11 +207,12 @@ def get_configured_clusters() -> list:
                 branch = parsed[2] if len(parsed) > 2 else "main"
                 run_command = parsed[3] if len(parsed) > 3 else "bot.py"
                 env_dict = parsed[4] if len(parsed) > 4 and isinstance(parsed[4], dict) else {}
-                python_version = parsed[5] if len(parsed) > 5 else None
+                raw_version = parsed[5] if len(parsed) > 5 else None
                 cron = parsed[6] if len(parsed) > 6 else None
 
                 bot_dir = APP_BASE_DIR / bot_name.replace(" ", "_")
                 git_info = get_git_info(bot_dir)
+                runtime, r_ver, r_display = parse_runtime(raw_version, bot_dir, run_command)
 
                 clusters.append({
                     "slot": slot,
@@ -178,7 +222,11 @@ def get_configured_clusters() -> list:
                     "branch": branch,
                     "run_command": run_command,
                     "env": env_dict,
-                    "python_version": python_version,
+                    "runtime": runtime,
+                    "runtime_version": r_ver,
+                    "runtime_display": r_display,
+                    "python_version": r_ver if runtime == "python" else None,
+                    "node_version": r_ver if runtime == "node" else None,
                     "cron": cron,
                     "source": "env" if (slot not in file_slots and slot in os.environ) else "file",
                     "dir_exists": bot_dir.exists(),
@@ -255,17 +303,25 @@ def get_next_available_slot() -> str:
 
 def save_cluster_to_env(slot: str, bot_data: dict) -> bool:
     """Write or update a CLUSTER_XX entry in cluster.env."""
+    runtime = bot_data.get("runtime") or ("node" if str(bot_data.get("python_version") or "").startswith("node") or bot_data.get("node_version") else "python")
+    run_cmd = bot_data.get("run_command") or ("index.js" if runtime == "node" else "bot.py")
+
     raw_array = [
         bot_data.get("bot_name", "bot01"),
         bot_data.get("git_url", ""),
         bot_data.get("branch", "main"),
-        bot_data.get("run_command", "bot.py"),
+        run_cmd,
         bot_data.get("env", {}),
     ]
-    if bot_data.get("python_version"):
-        raw_array.append(bot_data.get("python_version"))
+
+    if runtime == "node":
+        n_ver = bot_data.get("node_version") or bot_data.get("runtime_version") or "22"
+        saved_ver = f"node:{n_ver}" if not str(n_ver).startswith("node:") else n_ver
+        raw_array.append(saved_ver)
+    elif bot_data.get("python_version") or bot_data.get("runtime_version"):
+        raw_array.append(bot_data.get("python_version") or bot_data.get("runtime_version"))
+
     if bot_data.get("cron"):
-        # if python_version was skipped, put None in index 5
         while len(raw_array) < 6:
             raw_array.append(None)
         raw_array.append(bot_data.get("cron"))
