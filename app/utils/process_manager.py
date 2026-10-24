@@ -337,7 +337,32 @@ def build_run_command(run_cmd: str, bot_dir: Path, exec_bin: str, runtime: str =
         return " ".join([q(py), q((bot_dir / first).as_posix())] + [q(x) for x in rest])
     if first == "-m" and rest:
         return " ".join([q(py), "-m"] + [q(x) for x in rest])
-    return " ".join([q(py), "-m", q(Path(first).stem)] + [q(x) for x in rest])
+    module = first[:-3] if first.endswith(".py") else first   # keep dotted module paths (pkg.sub)
+    return " ".join([q(py), "-m", q(module)] + [q(x) for x in rest])
+
+
+def _file_stamp(path: Path) -> str:
+    try:
+        import hashlib
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except Exception:
+        return ""
+
+
+def _deps_stale(bot_dir: Path, manifest: str, stamp_dir: Path) -> bool:
+    """True when manifest differs from the one last installed (stamp saved by _save_stamp)."""
+    stamp = stamp_dir / ".deps_stamp"
+    try:
+        return stamp.read_text().strip() != _file_stamp(bot_dir / manifest)
+    except Exception:
+        return True
+
+
+def _save_stamp(bot_dir: Path, manifest: str, stamp_dir: Path):
+    try:
+        (stamp_dir / ".deps_stamp").write_text(_file_stamp(bot_dir / manifest))
+    except Exception:
+        pass
 
 
 def prepare_bot_environment(cluster: dict, force_reclone: bool = False) -> tuple[Path, str]:
@@ -372,17 +397,20 @@ def prepare_bot_environment(cluster: dict, force_reclone: bool = False) -> tuple
 
     if runtime == "node":
         node_version = r_ver or cluster.get("node_version") or "22"
-        if (bot_dir / 'package.json').exists() and not (bot_dir / 'node_modules').exists():
+        nm_dir = bot_dir / 'node_modules'
+        if (bot_dir / 'package.json').exists() and (not nm_dir.exists() or _deps_stale(bot_dir, 'package.json', nm_dir)):
             logger.info(f"Installing Node.js dependencies for {bot_name} (Node {node_version})...")
             install_node_dependencies(bot_dir, node_version)
+            _save_stamp(bot_dir, 'package.json', nm_dir)
         node_bin = get_node_bin(node_version, 'node')
         return bot_dir, build_run_command(run_cmd or 'index.js', bot_dir, node_bin, runtime="node", node_version=node_version)
 
     # Default: Python
     python_version = r_ver or cluster.get("python_version")
-    if (bot_dir / 'requirements.txt').exists() and not venv_dir.exists():
-        logger.info(f"Creating venv for {bot_name} (Python {python_version or 'default'})...")
+    if (bot_dir / 'requirements.txt').exists() and (not venv_dir.exists() or _deps_stale(bot_dir, 'requirements.txt', venv_dir)):
+        logger.info(f"Installing requirements for {bot_name} (Python {python_version or 'default'})...")
         install_requirements(bot_dir, python_version)
+        _save_stamp(bot_dir, 'requirements.txt', venv_dir)
 
     py = get_venv_bin(venv_dir, 'python').as_posix() if venv_dir.exists() else get_pyenv_python(python_version)
     return bot_dir, build_run_command(run_cmd or 'bot.py', bot_dir, py, runtime="python")
