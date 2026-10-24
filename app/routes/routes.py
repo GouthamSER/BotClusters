@@ -50,7 +50,7 @@ from app.utils.process_manager import (
     get_system_metrics, get_process_resource_usage,
     has_supervisorctl, prepare_bot_environment,
     write_supervisor_config_file, remove_supervisor_config,
-    install_requirements, get_venv_bin, _supervisor_env_string,
+    install_requirements, install_node_dependencies, get_venv_bin, _supervisor_env_string,
     _fallback_start, _fallback_stop, _fallback_status,
     _DEV_PROCESSES
 )
@@ -1061,15 +1061,26 @@ def _file_hash(path):
 
 def _deps_job(safe_name, bot_dir, label="requirements.txt changed - installing dependencies…"):
     bot = find_cluster(safe_name) or {}
+    was_running = get_process_state(safe_name) == "RUNNING"
 
     def work():
-        if (bot_dir / 'venv').exists():
+        if bot.get("runtime") == "node":
+            install_node_dependencies(bot_dir, bot.get("node_version"))
+        elif (bot_dir / 'venv').exists():
             _pip_install(bot_dir, bot.get("python_version"))
         else:
             install_requirements(bot_dir, bot.get("python_version"))
-        run_supervisor_command("restart", safe_name)
+        if was_running:
+            run_supervisor_command("restart", safe_name)
 
     return run_setup_job(safe_name, label, work)
+
+
+def restart_if_running(safe_name):
+    """Restart only when currently RUNNING. Webhook/auto-pull/rollback must not start a bot the user stopped."""
+    if get_process_state(safe_name) == "RUNNING":
+        return run_supervisor_command("restart", safe_name).get("status") == "success"
+    return False
 
 
 def pull_core(safe_name):
@@ -1079,7 +1090,7 @@ def pull_core(safe_name):
         return {"status": "error", "message": "Bot repository is not cloned yet - start the bot once first"}, 404
     try:
         before = _git(bot_dir, "rev-parse", "HEAD").stdout.strip()
-        req_before = _file_hash(bot_dir / "requirements.txt")
+        req_before = (_file_hash(bot_dir / "requirements.txt"), _file_hash(bot_dir / "package.json"))
         res = _git(bot_dir, "pull", "--ff-only")
         output = mask_url((res.stdout + "\n" + res.stderr).strip())
         if res.returncode != 0:
@@ -1092,12 +1103,12 @@ def pull_core(safe_name):
             return {"status": "success", "git_output": output, "restarted": False,
                     "message": f"{safe_name} is already up to date."}, 200
 
-        deps_changed = _file_hash(bot_dir / "requirements.txt") != req_before
+        deps_changed = (_file_hash(bot_dir / "requirements.txt"), _file_hash(bot_dir / "package.json")) != req_before
         if deps_changed:
             _deps_job(safe_name, bot_dir)
             restarted = "after dependency install"
         else:
-            restarted = run_supervisor_command("restart", safe_name).get("status") == "success"
+            restarted = restart_if_running(safe_name)
         broadcast_status_update()
         return {"status": "success", "git_output": output, "restarted": restarted,
                 "message": f"Pulled new code for {safe_name}" + (" (dependencies updating)." if deps_changed else ".")}, 200
@@ -1152,15 +1163,15 @@ def api_bot_rollback(process_name):
     if not (bot_dir / '.git').exists():
         return jsonify({"status": "error", "message": "Bot repository is not cloned yet"}), 404
     try:
-        req_before = _file_hash(bot_dir / "requirements.txt")
+        req_before = (_file_hash(bot_dir / "requirements.txt"), _file_hash(bot_dir / "package.json"))
         res = _git(bot_dir, "reset", "--hard", commit, timeout=60)
         if res.returncode != 0:
             return jsonify({"status": "error", "message": mask_url((res.stderr or res.stdout).strip()[-300:])}), 500
         invalidate_git_cache(bot_dir)
-        if _file_hash(bot_dir / "requirements.txt") != req_before:
+        if (_file_hash(bot_dir / "requirements.txt"), _file_hash(bot_dir / "package.json")) != req_before:
             _deps_job(safe_name, bot_dir, "Rolled back - reinstalling dependencies…")
         else:
-            run_supervisor_command("restart", safe_name)
+            restart_if_running(safe_name)
         broadcast_status_update()
         return jsonify({"status": "success",
                         "message": f"{safe_name} rolled back to {commit[:7]}. Pressing Pull later moves it forward again."}), 200
@@ -1210,8 +1221,8 @@ def api_bot_rebuild_venv(process_name):
             return bad_name_response()
         safe_name = process_name.replace(' ', '_')
         bot_dir = APP_BASE_DIR / safe_name
-        if not (bot_dir / "requirements.txt").exists():
-            return jsonify({"status": "error", "message": "No requirements.txt found in bot directory"}), 400
+        if not ((bot_dir / "requirements.txt").exists() or (bot_dir / "package.json").exists()):
+            return jsonify({"status": "error", "message": "No requirements.txt or package.json found in bot directory"}), 400
         started = _deps_job(safe_name, bot_dir, "Reinstalling dependencies…")
         broadcast_status_update()
         return jsonify({"status": "success",
@@ -1282,6 +1293,10 @@ def api_settings():
             app_url = (data.get('app_url') or '').strip() if 'app_url' in data else None
             if app_url and not app_url.startswith(('http://', 'https://')):
                 return jsonify({"status": "error", "message": "App URL must start with http:// or https://"}), 400
+            if 'auto_pull_minutes' in data:
+                ap = int(data['auto_pull_minutes'])
+                if ap != 0 and ap < 5:
+                    return jsonify({"status": "error", "message": "Auto-pull interval must be 0 (off) or at least 5 minutes"}), 400
             if data.get('admin_password') and len(data['admin_password']) < 6:
                 return jsonify({"status": "error", "message": "Password must be at least 6 characters"}), 400
 
@@ -1297,9 +1312,6 @@ def api_settings():
                 update_general_setting("CRON_RESTART_HOURS", str(hours))
                 CRON_RESTART_INTERVAL = hours
             if 'auto_pull_minutes' in data:
-                ap = int(data['auto_pull_minutes'])
-                if ap != 0 and ap < 5:
-                    return jsonify({"status": "error", "message": "Auto-pull interval must be 0 (off) or at least 5 minutes"}), 400
                 update_general_setting("AUTO_PULL_MINUTES", str(ap))
             if 'telegram_token' in data:
                 update_general_setting("TELEGRAM_NOTIFY_TOKEN", data['telegram_token'])
