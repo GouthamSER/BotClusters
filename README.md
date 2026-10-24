@@ -25,7 +25,8 @@ Have you encountered the problem where you have to host resource-efficient Teleg
 - 🎮 **Custom Execution**: *Configure custom entry scripts (`bot.py`, `main.py`, `app.py`, `start.sh`)*
 - 🔒 **Private Repo Support**: *Clone and run bots from private repositories using GitHub tokens*
 - 🎛️ **Cloud & Cross-Platform Integration**: *Ready for Render, Koyeb, Heroku, Docker, Codespaces, and standalone local environments*
-- 🐍 **Multi-Python Support**: *Supports specific Python versions (`3.8` to `3.13`)*
+- 🐍 **Multi-Python Support**: *Supports specific Python versions (`3.10` to `3.13`, as installed in the Docker image)*
+- 🟩 **Node.js Support**: *Run Node.js bots (`node:20`, `node:22`, `node:latest`) with automatic `npm install`*
 
 ---
 
@@ -45,14 +46,14 @@ Have you encountered the problem where you have to host resource-efficient Teleg
 | `branch` | Repository branch name | ✅ |
 | `run_command` | Bot execution command (`bot.py`, `main.py`, `start.sh`) | ✅ |
 | `env` | Environment variables dictionary | ❌ |
-| `python_version` | Custom Python Version (e.g. `3.9`, `3.10`, `3.11`) | ❌ |
-| `cron` | Auto-restart cron schedule, e.g. `0 */6 * * *` (7th item; or set it in the bot form) | ❌ |
+| `runtime_version` | Python version (`3.10`–`3.13`) or Node.js (`node:20`, `node:22`, `node:latest`) | ❌ |
+| `cron` | Auto-restart cron schedule, e.g. `0 */6 * * *` (7th item; use `null` as 6th item to skip the version; or set it in the bot form) | ❌ |
 
 ---
 
 ## ✅ Supported Python Versions
 
-`python3.8` &bull; `python3.9` &bull; `python3.10` &bull; `python3.11` &bull; `python3.12` &bull; `python3.13`
+`python3.10` &bull; `python3.11` &bull; `python3.12` &bull; `python3.13`
 
 ---
 
@@ -60,7 +61,7 @@ Have you encountered the problem where you have to host resource-efficient Teleg
 
 * **Format:**
 ```json
-["botname", "git_url", "branch", "run_command", {ENV_DICT}, "python_version"]
+["botname", "git_url", "branch", "run_command", {ENV_DICT}, "runtime_version", "cron"]
 ```
 
 * **For Public Repositories:**
@@ -75,7 +76,17 @@ Have you encountered the problem where you have to host resource-efficient Teleg
 
 * **For Custom Python Version:**
 ```json
-["bot03", "https://github.com/exampleuser/legacybot.git", "main", "main.py", {"PORT": "6060"}, "3.9"]
+["bot03", "https://github.com/exampleuser/legacybot.git", "main", "main.py", {"PORT": "6060"}, "3.11"]
+```
+
+* **For Node.js Bots:**
+```json
+["bot04", "https://github.com/exampleuser/nodebot.git", "main", "index.js", {"BOT_TOKEN": "123:ABC"}, "node:22"]
+```
+
+* **For Module Entry Points (`python -m`):**
+```json
+["bot05", "https://github.com/exampleuser/pkgbot.git", "main", "-m mypkg.main", {}]
 ```
 
 ---
@@ -109,6 +120,14 @@ Have you encountered the problem where you have to host resource-efficient Teleg
 
 ---
 
+## 🔧 ***Latest fixes***
+* Pull, webhook, auto-pull and rollback **no longer start a bot you stopped** - they restart only bots that are RUNNING.
+* Dependencies now **reinstall when `requirements.txt` / `package.json` changes**, also at boot after an auto-update (hash stamp inside `venv/` or `node_modules/`).
+* Node.js bots: pull / rollback re-run `npm install` when `package.json` changes.
+* Dotted module run commands (`pkg.sub.main`) are no longer cut to `pkg`.
+* Settings save is all-or-nothing: an invalid value no longer leaves earlier fields half-saved.
+* Graceful shutdown no longer crashes on a changing process list; stale *Installing…* badges clear at boot immediately.
+
 ## 🆕 ***What changed in 8.1 (bug-fix release)***
 * Live dashboard updates work again (`broadcast=` socket error fixed).
 * Bots no longer vanish / show STOPPED when one bot is down (`supervisorctl status` exit code 3).
@@ -129,9 +148,9 @@ Have you encountered the problem where you have to host resource-efficient Teleg
 * ⧉ **Clone bot**: copy a bot's settings into a new one.
 
 ## 📝 ***Notes***
-* Ensure all your bots are compatible with Python (or bash).
+* Bots can be Python, Node.js, or bash scripts.
 * It is not compulsory to set a Python version; only set it if your bot specifically requires an older/newer interpreter.
-* Keep your tokens and sensitive information secure in `cluster.env`.
+* Keep your tokens and sensitive information secure in `cluster.env`. **Never commit a real `cluster.env`** - add it to `.gitignore`.
 * If your bot needs additional system or pip packages, define them in `install.sh`.
 * **GUI login details (configurable via `ADMIN_USERNAME` and `ADMIN_PASSWORD`):**
   * Default `admin` / `password123` - **change it in Settings right after first login** (dashboard warns you).
