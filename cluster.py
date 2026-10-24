@@ -56,11 +56,11 @@ def stop_children():
         return
     _stopping = True
     logger.info("Shutting down BotClusters gracefully...")
-    for name, proc in CHILDREN.items():
+    for name, proc in list(CHILDREN.items()):
         if proc.poll() is None:
             proc.terminate()
     deadline = time.time() + 15
-    for proc in CHILDREN.values():
+    for proc in list(CHILDREN.values()):
         try:
             proc.wait(timeout=max(0.1, deadline - time.time()))
         except Exception:
