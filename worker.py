@@ -129,6 +129,11 @@ def main():
     clusters = get_configured_clusters()
     logging.info(f"Found {len(clusters)} configured bot(s): {[c['safe_name'] for c in clusters]}")
 
+    try:
+        os.remove("worker_state.json")          # drop stale INSTALLING/FAILED flags from last run
+    except OSError:
+        pass
+
     supervisor_ready = wait_for_supervisord()
 
     if args.restart:
@@ -138,10 +143,6 @@ def main():
         return
 
     remove_stale_programs({c["safe_name"] for c in clusters})
-    try:
-        os.remove("worker_state.json")          # drop stale INSTALLING/FAILED flags from last run
-    except OSError:
-        pass
 
     if not clusters:
         logging.info("No clusters configured. Add bots from the dashboard.")
