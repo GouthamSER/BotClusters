@@ -6,6 +6,9 @@ import signal
 import logging
 import threading
 import subprocess
+from dotenv import load_dotenv
+
+load_dotenv('cluster.env', override=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,14 +60,21 @@ def stop_children():
     _stopping = True
     logger.info("Shutting down BotClusters gracefully...")
     for name, proc in list(CHILDREN.items()):
-        if proc.poll() is None:
-            proc.terminate()
+        if proc and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
     deadline = time.time() + 15
     for proc in list(CHILDREN.values()):
-        try:
-            proc.wait(timeout=max(0.1, deadline - time.time()))
-        except Exception:
-            proc.kill()
+        if proc:
+            try:
+                proc.wait(timeout=max(0.1, deadline - time.time()))
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
 
 
 def shutdown(signum=None, frame=None):
