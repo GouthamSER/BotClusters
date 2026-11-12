@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import signal
 import logging
 import requests
 from dotenv import load_dotenv
@@ -39,17 +40,27 @@ def should_delay_ping():
 def ping_url(session, url):
     try:
         response = session.get(url, timeout=15)
-        if response.status_code == 200:
+        # Any response below 500 means the server is up and responsive (even if redirects or requires auth)
+        if response.status_code < 500:
             logger.info(f"Ping successful: {response.status_code} - {url}")
             return True
         else:
-            logger.warning(f"Ping responded with status: {response.status_code} - {url}")
+            logger.warning(f"Ping responded with server error: {response.status_code} - {url}")
             return False
     except requests.RequestException as e:
         logger.error(f"Error pinging URL: {e}")
         return False
 
 def main():
+    def handle_sigterm(signum, frame):
+        logger.info("Ping service stopping cleanly...")
+        sys.exit(0)
+
+    try:
+        signal.signal(signal.SIGTERM, handle_sigterm)
+    except (ValueError, AttributeError):
+        pass
+
     logger.info("Ping service started (reads APP_URL / PING_INTERVAL from cluster.env on every cycle).")
     if should_delay_ping():
         delay_seconds = get_delay()
