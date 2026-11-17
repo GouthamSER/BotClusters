@@ -1,0 +1,7 @@
+cluster.env
+.secret_key
+app.log
+bot_manager.log
+__pycache__/
+*.pyc
+supervisor_conf/
