@@ -248,8 +248,43 @@ def run_supervisor_command(command, process_name=None, timeout=30):
             return {"status": "success", "message": "Configuration updated"}
         return {"status": "error", "message": f"Unsupported command '{command}' on standalone mode"}
 
+    if command == "status":
+        return _cached_supervisor_status(process_name)
+
+    result = _raw_supervisor_command(command, process_name, timeout)
+    if command in ("start", "stop", "restart", "update", "reread", "add", "remove"):
+        _invalidate_status_cache()          # state changed - next status poll must be fresh
+    return result
+
+
+# ── supervisorctl runner + status cache ─────────────────────────
+# Root cause of "Supervisor is not answering yet ... timed out after 30 seconds":
+# every dashboard poll (each browser tab, the 15s monitor, per-bot lookups) used to spawn its
+# own `supervisorctl status`. supervisord is single-threaded, so calls queued behind each other
+# (and behind slow start/stop/update), and the 30s timeout fired. Now: ONE status call at a time,
+# shared by all callers, cached for a few seconds, and a stale copy is served if supervisord is busy.
+_SUPERVISOR_CONF = Path(__file__).resolve().parents[2] / "supervisord.conf"
+_STATUS_TTL = 3.0              # seconds a fresh status is reused
+_STATUS_STALE_MAX = 300        # serve last good status up to this old when supervisord is busy
+_STATUS_TIMEOUT = 20
+_STATUS_CACHE = {"ts": 0.0, "result": None, "good_ts": 0.0, "good": None}
+_STATUS_LOCK = threading.Lock()
+
+
+def _friendly_supervisor_error(msg):
+    low = (msg or "").lower()
+    if "timed out" in low:
+        return "Supervisor is busy (starting or installing bots). Showing last known state."
+    if any(k in low for k in ("refused", "no such file", "sock no such", "not running", "unix:///")):
+        return "Supervisor is still starting up."
+    return msg or "Unknown supervisor error"
+
+
+def _raw_supervisor_command(command, process_name=None, timeout=30):
     try:
         cmd = ["supervisorctl"]
+        if _SUPERVISOR_CONF.exists():
+            cmd += ["-c", str(_SUPERVISOR_CONF)]      # works no matter what the cwd is
         if command:
             cmd.append(command)
         if process_name:
@@ -271,6 +306,41 @@ def run_supervisor_command(command, process_name=None, timeout=30):
     except Exception as e:
         logger.error(f"Error executing supervisor command: {e}")
         return {"status": "error", "message": str(e)}
+
+
+def _invalidate_status_cache():
+    _STATUS_CACHE["ts"] = 0.0
+
+
+def _filter_status(result, process_name):
+    if not process_name or result.get("status") != "success":
+        return result
+    want = process_name.replace(' ', '_')
+    lines = [l for l in result["message"].splitlines() if l.split() and l.split()[0] == want]
+    return {**result, "message": "\n".join(lines)}
+
+
+def _cached_supervisor_status(process_name=None):
+    now = time.time()
+    c = _STATUS_CACHE
+    if c["result"] is not None and now - c["ts"] < _STATUS_TTL:
+        return _filter_status(c["result"], process_name)
+
+    with _STATUS_LOCK:                       # single-flight: others wait, then reuse the result
+        now = time.time()
+        if c["result"] is not None and now - c["ts"] < _STATUS_TTL:
+            return _filter_status(c["result"], process_name)
+
+        res = _raw_supervisor_command("status", None, _STATUS_TIMEOUT)
+        if res["status"] == "success":
+            c["good"], c["good_ts"] = res, time.time()
+        elif c["good"] is not None and time.time() - c["good_ts"] < _STATUS_STALE_MAX:
+            # supervisord busy -> keep showing last known state instead of an error flash
+            res = {**c["good"], "stale": True, "warning": _friendly_supervisor_error(res["message"])}
+        else:
+            res = {**res, "message": _friendly_supervisor_error(res["message"])}
+        c["result"], c["ts"] = res, time.time()
+        return _filter_status(res, process_name)
 
 
 def get_process_state(name):
@@ -378,6 +448,7 @@ def build_process_status_payload():
     config_by_name = {c['safe_name']: c for c in configured}
     config_by_name.update({c['bot_name']: c for c in configured})
     supervisor_error = None
+    supervisor_warning = status.get("warning") if status.get("stale") else None
 
     if status.get("status") == "success" and status.get("message"):
         for proc_line in status["message"].splitlines():
@@ -426,6 +497,7 @@ def build_process_status_payload():
         "processes": processes,
         "system": get_system_metrics(),
         "supervisor_error": supervisor_error,
+        "supervisor_warning": supervisor_warning,
         "default_password": using_default_password(),
         "timestamp": datetime.now(timezone.utc).isoformat()
     }

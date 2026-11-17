@@ -75,13 +75,40 @@ function showHealthNotices(data) {
         _noticeShown.pw = true;
         showToast('Security: you still use a default dashboard password. Change it in Settings (gear icon).', 'error');
     }
-    if (data.supervisor_error && !_noticeShown.sup) {
-        _noticeShown.sup = true;
-        showToast('Supervisor is not answering yet: ' + data.supervisor_error + ' (retrying automatically)', 'error');
-    } else if (!data.supervisor_error) {
-        _noticeShown.sup = false;
+    // Supervisor status banner (replaces the old raw-error toast)
+    const banner = document.getElementById('supervisor-banner');
+    const msg = data.supervisor_error || data.supervisor_warning;
+    if (banner) {
+        if (msg) {
+            banner.textContent = '⏳ ' + msg + ' Retrying automatically…';
+            banner.className = 'supervisor-banner ' + (data.supervisor_error ? 'error' : 'warn');
+            banner.style.display = 'block';
+            _noticeShown.supDown = true;
+        } else {
+            banner.style.display = 'none';
+            if (_noticeShown.supDown) {
+                _noticeShown.supDown = false;
+                showToast('Supervisor is back online', 'success');
+            }
+        }
     }
 }
+
+// Keyboard shortcuts: "/" search, "n" new bot, "r" refresh
+document.addEventListener('keydown', function (e) {
+    const t = e.target;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+    if (document.querySelector('.modal.show, .modal.active, .modal[style*="display: flex"], .modal[style*="display: block"]')) return;
+    if (e.key === '/') {
+        const el = document.getElementById('bot-search-input');
+        if (el) { e.preventDefault(); el.focus(); }
+    } else if (e.key === 'n' && typeof openAddBotModal === 'function') {
+        e.preventDefault(); openAddBotModal();
+    } else if (e.key === 'r') {
+        requestStatus(); showToast('Refreshing…', 'info');
+    }
+});
 
 function sparkline(values, color) {
     if (!values || values.length < 2) return '<svg viewBox="0 0 100 26" preserveAspectRatio="none"></svg>';
@@ -1171,8 +1198,14 @@ function showToast(message, type = 'info') {
     const container = document.getElementById('toast-container');
     if (!container) return;
 
+    for (const el of container.querySelectorAll('.toast-msg')) {
+        if (el.textContent === message) return;          // no duplicate stacking
+    }
     const toast = document.createElement('div');
     toast.className = `toast toast-${type}`;
+    toast.title = 'Click to dismiss';
+    toast.style.cursor = 'pointer';
+    toast.onclick = () => toast.remove();
 
     let icon = 'ℹ️';
     if (type === 'success') icon = '✅';

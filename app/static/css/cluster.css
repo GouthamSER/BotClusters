@@ -1208,3 +1208,8 @@ footer#contact a:hover { text-decoration: underline; }
 .version-row .v-sub { color: #94a3b8; font-size: 11px; }
 .version-row .v-subject { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .env-eye { background: none; border: 0; cursor: pointer; color: #94a3b8; font-size: 15px; padding: 0 6px; }
+
+/* Supervisor status banner */
+.supervisor-banner { margin: 0 0 14px; padding: 10px 14px; border-radius: 8px; font-size: 13px; font-weight: 500; }
+.supervisor-banner.warn  { background: rgba(245,158,11,.12); border: 1px solid rgba(245,158,11,.4); color: #f59e0b; }
+.supervisor-banner.error { background: rgba(239,68,68,.12);  border: 1px solid rgba(239,68,68,.4);  color: #ef4444; }

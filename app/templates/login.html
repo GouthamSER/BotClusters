@@ -43,19 +43,23 @@
                         <svg class="input-icon" width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
                             <path d="M8 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm2-3a2 2 0 1 1-4 0 2 2 0 0 1 4 0zm4 8c0 1-1 1-1 1H3s-1 0-1-1 1-4 6-4 6 3 6 4zm-1-.004c-.001-.246-.154-.986-.832-1.664C11.516 10.68 10.289 10 8 10c-2.29 0-3.516.68-4.168 1.332-.678.678-.83 1.418-.832 1.664h10z"/>
                         </svg>
-                        <input type="text" id="username" name="username" required placeholder="Enter username" autocomplete="username">
+                        <input type="text" id="username" name="username" required placeholder="Enter username" autocomplete="username" autofocus>
                     </div>
                 </div>
 
                 <div class="form-group">
                     <label for="password">Password</label>
-                    <div class="input-wrapper">
+                    <div class="input-wrapper has-toggle">
                         <svg class="input-icon" width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
                             <path d="M8 1a3.5 3.5 0 0 0-3.5 3.5V6H3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-1.5V4.5A3.5 3.5 0 0 0 8 1zm2 5H6V4.5a2 2 0 1 1 4 0V6z"/>
                         </svg>
                         <input type="password" id="password" name="password" required placeholder="••••••••" autocomplete="current-password">
+                        <button type="button" class="pw-toggle" id="pw-toggle" aria-label="Show password" title="Show / hide password">👁</button>
                     </div>
+                    <div class="caps-warn" id="caps-warn">⚠️ Caps Lock is on</div>
                 </div>
+
+                <label class="remember-row"><input type="checkbox" id="remember-user"> Remember username on this device</label>
 
                 <button type="submit" class="submit-btn" id="login-submit-btn">
                     <span>Sign In</span>
@@ -70,5 +74,25 @@
             </div>
         </div>
     </div>
+<script>
+(function () {
+    const u = document.getElementById('username'), p = document.getElementById('password');
+    const rem = document.getElementById('remember-user'), form = document.querySelector('.login-form');
+    const btn = document.getElementById('login-submit-btn');
+    try { const v = localStorage.getItem('bc_user'); if (v) { u.value = v; rem.checked = true; p.focus(); } } catch (e) {}
+    document.getElementById('pw-toggle').onclick = function () {
+        p.type = p.type === 'password' ? 'text' : 'password';
+    };
+    p.addEventListener('keyup', function (e) {
+        document.getElementById('caps-warn').style.display =
+            (e.getModifierState && e.getModifierState('CapsLock')) ? 'block' : 'none';
+    });
+    form.addEventListener('submit', function () {
+        try { rem.checked ? localStorage.setItem('bc_user', u.value) : localStorage.removeItem('bc_user'); } catch (e) {}
+        btn.classList.add('loading');
+        btn.querySelector('span').textContent = 'Signing in…';
+    });
+})();
+</script>
 </body>
 </html>
